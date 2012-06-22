@@ -37,7 +37,7 @@
 #endif
 #include <linux/switch.h>
 #include <mach/board-cardhu-misc.h>
-#include <iCatch7002a.h>
+#include "iCatch7002a.h"
 
 #define I7002A_SDEV_NAME "camera"
 
