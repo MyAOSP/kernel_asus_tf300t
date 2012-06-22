@@ -43,9 +43,22 @@ config CFQ_GROUP_IOSCHED
 	---help---
 	  Enable group IO scheduling in CFQ.
 
+config IOSCHED_SIO
+    tristate "Simple I/O scheduler"
+    default y
+    ---help---
+      Simple I/O scheduler
+
+config IOSCHED_VR
+    tristate "V(R) I/O scheduler"
+    default y
+    ---help---
+      Requests are chosen according to SSTF with a penalty of rev_penalty
+      for switching head direction.
+
 choice
 	prompt "Default I/O scheduler"
-	default DEFAULT_CFQ
+	default DEFAULT_SIO
 	help
 	  Select the I/O scheduler which will be used by default for all
 	  block devices.
@@ -58,6 +71,12 @@ choice
 
 	config DEFAULT_NOOP
 		bool "No-op"
+
+    config DEFAULT_VR
+        bool "V(R)" if IOSCHED_VR=y
+
+    config DEFAULT_SIO
+        bool "sio" if IOSCHED_SIO=y
 
 endchoice
 
