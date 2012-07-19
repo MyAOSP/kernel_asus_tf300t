@@ -42,6 +42,7 @@
 #include <linux/ethtool.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
+#include <linux/device.h>
 
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
@@ -2485,7 +2486,7 @@ dhd_del_if(dhd_info_t *dhd, int ifidx)
 }
 
 dhd_pub_t *
-dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen)
+dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen, void *dev)
 {
 	dhd_info_t *dhd = NULL;
 	struct net_device *net = NULL;
@@ -2506,6 +2507,7 @@ dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen)
 	}
 	dhd_state |= DHD_ATTACH_STATE_NET_ALLOC;
 
+	SET_NETDEV_DEV(net, (struct device *)dev);
 	/* Allocate primary dhd_info */
 	if (!(dhd = MALLOC(osh, sizeof(dhd_info_t)))) {
 		DHD_ERROR(("%s: OOM - alloc dhd_info\n", __FUNCTION__));
@@ -2928,8 +2930,9 @@ dhd_preinit_ioctls(dhd_pub_t *dhd)
 		dhd_pkt_filter_enable = TRUE;
 	}
 
-	printf("Firmware up: op_mode=%d, "
+	printf("Firmware up: fw_path=%s op_mode=%d, "
 			"Broadcom Dongle Host Driver mac=%.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+			fw_path,
 			dhd->op_mode,
 			dhd->mac.octet[0], dhd->mac.octet[1], dhd->mac.octet[2],
 			dhd->mac.octet[3], dhd->mac.octet[4], dhd->mac.octet[5]);
@@ -3017,7 +3020,6 @@ dhd_preinit_ioctls(dhd_pub_t *dhd)
 	setbit(eventmask, WLC_E_NDIS_LINK);
 	setbit(eventmask, WLC_E_MIC_ERROR);
 	setbit(eventmask, WLC_E_PMKID_CACHE);
-	setbit(eventmask, WLC_E_TXFAIL);
 	setbit(eventmask, WLC_E_JOIN_START);
 	setbit(eventmask, WLC_E_SCAN_COMPLETE);
 #ifdef WLMEDIA_HTSF
