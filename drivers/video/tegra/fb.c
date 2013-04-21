@@ -122,10 +122,13 @@ static int tegra_fb_set_par(struct fb_info *info)
 		default:
 			return -EINVAL;
 		}
-		info->fix.line_length = var->xres * var->bits_per_pixel / 8;
-		/* Pad the stride to 16-byte boundary. */
-		info->fix.line_length = round_up(info->fix.line_length,
+		/* if line_length unset, then pad the stride */
+		if (!info->fix.line_length) {
+			info->fix.line_length = var->xres * var->bits_per_pixel
+				/ 8;
+			info->fix.line_length = round_up(info->fix.line_length,
 						TEGRA_LINEAR_PITCH_ALIGNMENT);
+		}
 		tegra_fb->win->stride = info->fix.line_length;
 		tegra_fb->win->stride_uv = 0;
 		tegra_fb->win->phys_addr_u = 0;
@@ -322,8 +325,11 @@ static void tegra_fb_imageblit(struct fb_info *info,
 
 static int tegra_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
 {
+	struct tegra_fb_info *tegra_fb = (struct tegra_fb_info *)info->par;
+	struct tegra_dc *dc = tegra_fb->win->dc;
 	struct tegra_fb_modedb modedb;
 	struct fb_modelist *modelist;
+	struct fb_vblank vblank = {};
 	int i;
 
 	switch (cmd) {
@@ -343,6 +349,8 @@ static int tegra_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long 
 			memset(&var, 0x0, sizeof(var));
 
 			fb_videomode_to_var(&var, &modelist->mode);
+			var.width = tegra_dc_get_out_width(dc);
+			var.height = tegra_dc_get_out_height(dc);
 
 			if (copy_to_user((void __user *)&modedb.modedb[i],
 					 &var, sizeof(var)))
@@ -365,6 +373,17 @@ static int tegra_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long 
 		if (copy_to_user((void __user *)arg, &modedb, sizeof(modedb)))
 			return -EFAULT;
 		break;
+
+	case FBIOGET_VBLANK:
+		tegra_dc_get_fbvblank(tegra_fb->win->dc, &vblank);
+
+		if (copy_to_user(
+			(void __user *)arg, &vblank, sizeof(vblank)))
+			return -EFAULT;
+		break;
+
+	case FBIO_WAITFORVSYNC:
+		return tegra_dc_wait_for_vsync(tegra_fb->win->dc);
 
 	default:
 		return -ENOTTY;
@@ -516,8 +535,10 @@ struct tegra_fb_info *tegra_fb_register(struct nvhost_device *ndev,
 		tegra_fb->valid = true;
 	}
 
+	info->fix.line_length = fb_data->xres * fb_data->bits_per_pixel / 8;
+
 	stride = tegra_dc_get_stride(dc, 0);
-	if (!stride) /* default to pad the stride to 16-byte boundary. */
+	if (!stride) /* default to pad the stride */
 		stride = round_up(info->fix.line_length,
 			TEGRA_LINEAR_PITCH_ALIGNMENT);
 
@@ -534,7 +555,6 @@ struct tegra_fb_info *tegra_fb_register(struct nvhost_device *ndev,
 	info->fix.accel		= FB_ACCEL_NONE;
 	info->fix.smem_start	= fb_phys;
 	info->fix.smem_len	= fb_size;
-	info->fix.line_length = fb_data->xres * fb_data->bits_per_pixel / 8;
 	info->fix.line_length = stride;
 
 	info->var.xres			= fb_data->xres;
@@ -592,6 +612,7 @@ struct tegra_fb_info *tegra_fb_register(struct nvhost_device *ndev,
 
 	if (dc->mode.pclk > 1000) {
 		struct tegra_dc_mode *mode = &dc->mode;
+		struct fb_videomode vmode;
 
 		if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE)
 			info->var.pixclock = KHZ2PICOS(mode->rated_pclk / 1000);
@@ -603,6 +624,10 @@ struct tegra_fb_info *tegra_fb_register(struct nvhost_device *ndev,
 		info->var.lower_margin = mode->v_front_porch;
 		info->var.hsync_len = mode->h_sync_width;
 		info->var.vsync_len = mode->v_sync_width;
+
+		/* Keep info->var consistent with info->modelist. */
+		fb_var_to_videomode(&vmode, &info->var);
+		fb_add_videomode(&vmode, &info->modelist);
 	}
 
 	return tegra_fb;

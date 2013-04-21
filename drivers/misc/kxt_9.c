@@ -76,6 +76,8 @@
 #define RES_WIN_TIMER		13
 #define RESUME_ENTRIES		14
 
+#define KXTF9_CALIBRATION_PATH "/data/sensors/Accel_Config.ini"
+#define REG_NUM 	96	/* Number of registers about KXTF9*/
 /*
  * The following table lists the maximum appropriate poll interval for each
  * available output data rate.
@@ -219,7 +221,7 @@ static int KXT_9_hw_init(struct KXT_9_data *tf9)
 	err = KXT_9_i2c_write(tf9, INT_CTRL1, &tf9->resume[RES_INT_CTRL1], 1);
 	if (err < 0)
 		return err;
-	buf[0] = (tf9->resume[RES_CTRL_REG1] | PC1_ON |0x20); // | 0x20 to enable DRDYE
+	buf[0] = (tf9->resume[RES_CTRL_REG1] | PC1_ON);
 	err = KXT_9_i2c_write(tf9, CTRL_REG1, buf, 1);
 	if (err < 0)
 		return err;
@@ -352,6 +354,7 @@ static void KXT_9_irq_work_func(struct work_struct *work)
 	if (err < 0)
 		dev_err(&tf9->client->dev, "read err int source\n");
 	int_status = status << 24;
+
 	if ((status & TPS) > 0) {
 		err = KXT_9_i2c_read(tf9, TILT_POS_CUR, buf, 2);
 		if (err < 0)
@@ -435,7 +438,9 @@ int KXT_9_update_g_range(struct KXT_9_data *tf9, u8 new_g_range)
 			if (err < 0)
 				return err;
 		}
-	}
+	}else
+		buf = tf9->resume[RES_CTRL_REG1];
+
 	tf9->resume[RES_CTRL_REG1] = buf;
 	tf9->pdata->shift_adj = shift;
 
@@ -784,6 +789,24 @@ static ssize_t KXT_9_selftest_store(struct device *dev,
 	return count;
 }
 
+static ssize_t KXT_9_dump_reg(struct device *dev,
+					struct device_attribute *attr,
+						const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct KXT_9_data *tf9 = i2c_get_clientdata(client);
+	int ii, err = -1;
+	ssize_t bytes_printed = 0;
+	unsigned char data;
+
+	for (ii = 0; ii < REG_NUM; ii++) {
+		err = KXT_9_i2c_read(tf9, ii, &data, 1);
+		bytes_printed += sprintf(buf + bytes_printed, "%#2x: %#2x\n", ii, data);
+	}
+
+	return bytes_printed;
+}
+
 static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR, KXT_9_delay_show, KXT_9_delay_store);
 static DEVICE_ATTR(enable, S_IRUGO|S_IWUSR, KXT_9_enable_show,
 						KXT_9_enable_store);
@@ -791,7 +814,9 @@ static DEVICE_ATTR(tilt, S_IRUGO|S_IWUSR, KXT_9_tilt_show, KXT_9_tilt_store);
 static DEVICE_ATTR(wake, S_IRUGO|S_IWUSR, KXT_9_wake_show, KXT_9_wake_store);
 static DEVICE_ATTR(tap, S_IRUGO|S_IWUSR, KXT_9_tap_show, KXT_9_tap_store);
 static DEVICE_ATTR(selftest, S_IWUSR, NULL, KXT_9_selftest_store);
+static DEVICE_ATTR(dump_reg, S_IRUGO, KXT_9_dump_reg, NULL);
 
+#ifdef CONFIG_DEBUG_ASUS
 static struct attribute *KXT_9_attributes[] = {
 	&dev_attr_delay.attr,
 	&dev_attr_enable.attr,
@@ -799,13 +824,27 @@ static struct attribute *KXT_9_attributes[] = {
 	&dev_attr_wake.attr,
 	&dev_attr_tap.attr,
 	&dev_attr_selftest.attr,
+	&dev_attr_dump_reg.attr,
 	NULL
 };
+
+#else
+static struct attribute *KXT_9_attributes[] = {
+	&dev_attr_delay.attr,
+	&dev_attr_enable.attr,
+	&dev_attr_tilt.attr,
+	&dev_attr_wake.attr,
+	&dev_attr_tap.attr,
+	NULL
+};
+
+#endif
 
 static struct attribute_group KXT_9_attribute_group = {
 	.attrs = KXT_9_attributes
 };
 /* /sysfs */
+
 static int __devinit KXT_9_probe(struct i2c_client *client,
 						const struct i2c_device_id *id)
 {
@@ -941,18 +980,32 @@ static int __devexit KXT_9_remove(struct i2c_client *client)
 }
 
 #ifdef CONFIG_PM
-static int KXT_9_resume(struct i2c_client *client)
+static int KXT_9_resume(struct device *dev)
 {
-	struct KXT_9_data *tf9 = i2c_get_clientdata(client);
+	printk(KERN_INFO "%s+ #####\n", __func__);
+	struct i2c_client *client = i2c_verify_client(dev);
+	struct KXT_9_data *tf9;
+	int res;
 
-	return KXT_9_enable(tf9);
+	tf9 = i2c_get_clientdata(client);
+	res = KXT_9_enable(tf9);
+
+	printk(KERN_INFO "%s- #####\n", __func__);
+	return res;
 }
 
-static int KXT_9_suspend(struct i2c_client *client, pm_message_t mesg)
+static int KXT_9_suspend(struct device *dev, pm_message_t mesg)
 {
-	struct KXT_9_data *tf9 = i2c_get_clientdata(client);
+	printk(KERN_INFO "%s+ #####\n", __func__);
+	struct i2c_client *client = i2c_verify_client(dev);
+	struct KXT_9_data *tf9;
+	int res;
 
-	return KXT_9_disable(tf9);
+	tf9 = i2c_get_clientdata(client);
+	res = KXT_9_disable(tf9);
+
+	printk(KERN_INFO "%s- #####\n", __func__);
+	return res;
 }
 #endif
 
@@ -963,21 +1016,30 @@ static const struct i2c_device_id KXT_9_id[] = {
 
 MODULE_DEVICE_TABLE(i2c, KXT_9_id);
 
+static const struct dev_pm_ops kxt_9_pm_ops={
+	.suspend = KXT_9_suspend,
+	.resume = KXT_9_resume,
+};
+
 static struct i2c_driver KXT_9_driver = {
 	.driver = {
 		   .name = NAME,
+		   .pm = &kxt_9_pm_ops,
 		   },
 	.probe = KXT_9_probe,
 	.remove = __devexit_p(KXT_9_remove),
-	.resume = KXT_9_resume,
-	.suspend = KXT_9_suspend,
 	.id_table = KXT_9_id,
 };
 
 static int __init KXT_9_init(void)
 {
+	int res;
+
 	printk(KERN_INFO "%s+ #####\n", __func__);
-	return i2c_add_driver(&KXT_9_driver);
+	res = i2c_add_driver(&KXT_9_driver);
+	printk(KERN_INFO "%s- #####\n", __func__);
+
+	return res;
 }
 
 static void __exit KXT_9_exit(void)

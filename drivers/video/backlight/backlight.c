@@ -14,6 +14,7 @@
 #include <linux/err.h>
 #include <linux/fb.h>
 #include <linux/slab.h>
+#include <mach/board-cardhu-misc.h>
 
 #ifdef CONFIG_PMAC_BACKLIGHT
 #include <asm/backlight.h>
@@ -135,12 +136,25 @@ static ssize_t backlight_store_power(struct device *dev,
 	return rc;
 }
 
+static inline int backlight_get_brightness(struct backlight_device *bd)
+{
+	int brightness = 0;
+	mutex_lock(&bd->update_lock);
+	if (bd->ops && bd->ops->get_brightness)
+		brightness = bd->ops->get_brightness(bd);
+	mutex_unlock(&bd->update_lock);
+	return brightness;
+}
+
 static ssize_t backlight_show_brightness(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct backlight_device *bd = to_backlight_device(dev);
 
-	return sprintf(buf, "%d\n", bd->props.brightness);
+        if (tegra3_get_project_id()==TEGRA3_PROJECT_P1801)
+                return sprintf(buf, "%d\n", backlight_get_brightness(bd));
+        else
+                return sprintf(buf, "%d\n", bd->props.brightness);
 }
 
 static ssize_t backlight_store_brightness(struct device *dev,

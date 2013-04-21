@@ -49,7 +49,7 @@
 #include <linux/list.h>
 
 #include "cdc-acm.h"
-#include <mach/board-cardhu-misc.h>
+
 
 #define DRIVER_AUTHOR "Armin Fuerst, Pavel Machek, Johannes Erdfelt, Vojtech Pavlik, David Kubicek, Johan Hovold"
 #define DRIVER_DESC "USB Abstract Control Model driver for USB modems and ISDN adapters"
@@ -61,9 +61,6 @@ static struct acm *acm_table[ACM_TTY_MINORS];
 static DEFINE_MUTEX(open_mutex);
 
 #define ACM_READY(acm)	(acm && acm->dev && acm->port.count)
-
-bool gps_dongle_flag = false;
-EXPORT_SYMBOL(gps_dongle_flag);
 
 static const struct tty_port_operations acm_port_ops = {
 };
@@ -198,8 +195,13 @@ static int acm_write_start(struct acm *acm, int wbn)
 #else
 		if (!acm->delayed_wb)
 			acm->delayed_wb = wb;
-		else
+		else {
 			usb_autopm_put_interface_async(acm->control);
+			printk(KERN_INFO "%s: acm->delayed_wb is not NULL, "
+				"returning -EAGAIN\n", __func__);
+			spin_unlock_irqrestore(&acm->write_lock, flags);
+			return -EAGAIN;
+		}
 #endif
 		spin_unlock_irqrestore(&acm->write_lock, flags);
 		return 0;	/* A white lie */
@@ -419,7 +421,7 @@ static void acm_read_bulk_callback(struct urb *urb)
 	}
 	usb_mark_last_busy(acm->dev);
 
-	if (urb->status) {
+	if (urb->status && !urb->actual_length) {
 		dev_dbg(&acm->data->dev, "%s - non-zero urb status: %d\n",
 							__func__, urb->status);
 		return;
@@ -893,16 +895,21 @@ static int acm_probe(struct usb_interface *intf,
 	int num_rx_buf;
 	int i;
 	int combined_interfaces = 0;
-	u32 project_info = tegra3_get_project_id();
 
 	/* normal quirks */
 	quirks = (unsigned long)id->driver_info;
 	num_rx_buf = (quirks == SINGLE_RX_URB) ? 1 : ACM_NR;
 
-	if (project_info == TEGRA3_PROJECT_TF201) {
-		if (usb_dev->descriptor.idVendor == 0x1546 && usb_dev->descriptor.idProduct == 0x01a6) {
-			dev_info(&usb_dev->dev, "ublox - GPS Receiver Dongle plug.\n");
-			gps_dongle_flag = true;
+	/* Don't bind network interfaces on IMC XMM6260 */
+	if (usb_dev->descriptor.idVendor == 0x1519 &&
+		usb_dev->descriptor.idProduct == 0x0020 &&
+		usb_dev->actconfig->desc.bNumInterfaces != 5) {
+		if (intf->cur_altsetting->desc.bInterfaceNumber == 0x2 ||
+			intf->cur_altsetting->desc.bInterfaceNumber == 0x3 ||
+			intf->cur_altsetting->desc.bInterfaceNumber == 0x4 ||
+			intf->cur_altsetting->desc.bInterfaceNumber == 0x5) {
+			dev_info(&intf->dev, "Leaving this interface to raw_ip_net\n");
+			return -ENODEV;
 		}
 	}
 
@@ -1317,7 +1324,6 @@ static void acm_disconnect(struct usb_interface *intf)
 	struct usb_device *usb_dev = interface_to_usbdev(intf);
 	struct tty_struct *tty;
 	struct urb *res;
-	u32 project_info = tegra3_get_project_id();
 
 	/* sibling interface is already cleaning up */
 	if (!acm)
@@ -1361,13 +1367,6 @@ static void acm_disconnect(struct usb_interface *intf)
 	if (tty) {
 		tty_hangup(tty);
 		tty_kref_put(tty);
-	}
-
-	if (project_info == TEGRA3_PROJECT_TF201) {
-		if(gps_dongle_flag == true) {
-			dev_info(&usb_dev->dev, "ublox - GPS Receiver Dongle unplug.\n");
-			gps_dongle_flag = false;
-		}
 	}
 }
 
@@ -1593,7 +1592,7 @@ static const struct usb_device_id acm_ids[] = {
 	.driver_info = NO_UNION_NORMAL, /* reports zero length descriptor */
 	},
 	{ USB_DEVICE(0x1519, 0x0020),
-	.driver_info = NO_UNION_NORMAL | NO_HANGUP_IN_RESET_RESUME, /* has no union descriptor */
+	.driver_info = NO_HANGUP_IN_RESET_RESUME, /* has no union descriptor */
 	},
 
 	/* Nokia S60 phones expose two ACM channels. The first is
