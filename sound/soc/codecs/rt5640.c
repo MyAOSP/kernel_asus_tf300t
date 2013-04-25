@@ -296,6 +296,7 @@ enum
 	TREBLE,
 	BASS,
 	TF500T,
+	ME301T,
 };
 
 typedef struct  _HW_EQ_PRESET
@@ -319,6 +320,7 @@ static HW_EQ_PRESET HwEq_Preset[]={
 	{TREBLE,{0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x188D,0x1699,0x0000,0x0000,0x0000},0x0020},
 	{BASS  ,{0x1A43,0x0C00,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},0x0001},
 	{TF500T  ,{0x1C10,0x0000,0xC210,0x1DF8,0x1D18,0xC21D,0x1E5E,0xF805,0xCB34,0x188D,0x0699,0xEE23,0x0EAD,0xF5AE,0x0D41,0x1D18,0x1FA5,0x005A,0x1FA5},0x007E},
+	{ME301T,{0x1F95,0x0000,0xC883,0x1C10,0x0000,0xD588,0x1C10,0x0000,0xE904,0x1C10,0x0000,0xE904,0x1C10,0x0000,0x0436,0x0000,0x1F8E,0x0070,0x1F8F},0x0040},
 };
 
 //*************************************************************************************************
@@ -556,6 +558,9 @@ static void rt5640_update_eqmode(struct snd_soc_codec *codec, int mode)
 				rt5640_index_write(codec,RT5640_EQ_PRE_VOL,0x02D6);
 				rt5640_index_write(codec,RT5640_EQ_PST_VOL,0x0800);
 				break;
+            case TEGRA3_PROJECT_ME301T:
+                rt5640_index_write(codec,RT5640_EQ_PRE_VOL,0x0800);
+                rt5640_index_write(codec,RT5640_EQ_PST_VOL,0x0800);
 			case TEGRA3_PROJECT_P1801:
 				break;
 			default:
@@ -1711,10 +1716,11 @@ static int rt5640_spk_event(struct snd_soc_dapm_widget *w,
 			case TEGRA3_PROJECT_P1801:
 				break;
 			case TEGRA3_PROJECT_ME301T:
-				/* set speaker vol +1.5dB */
+				/* set speaker vol to 0dB( default 3db)*/
 				snd_soc_update_bits(codec, RT5640_SPK_VOL,
 					RT5640_L_VOL_MASK | RT5640_R_VOL_MASK,
-					0x0707);
+					0x0808);
+				rt5640_update_eqmode(codec,ME301T);
 				break;
 			default:
 				break;
@@ -1741,6 +1747,7 @@ static int rt5640_spk_event(struct snd_soc_dapm_widget *w,
 					snd_soc_write(codec, RT5640_DRC_AGC_2,0x0009);
 					snd_soc_write(codec, RT5640_DRC_AGC_3,0x3044);
 				}
+			case TEGRA3_PROJECT_ME301T:
 				rt5640_update_eqmode(codec,NORMAL);
 				break;
 			case TEGRA3_PROJECT_P1801:

@@ -126,6 +126,7 @@ static struct workqueue_struct *smb347_wq;
 struct wake_lock charger_wakelock;
 struct wake_lock charger_ac_detec_wakelock;
 unsigned smb347_charger_status = 0;
+static unsigned cable_state_detect = 0;
 
 /* Sysfs interface */
 static DEVICE_ATTR(reg_status, S_IWUSR | S_IRUGO, smb347_reg_show, NULL);
@@ -740,6 +741,25 @@ static int cable_type_detect(void)
 				} else {
 					charger->cur_cable_type = unknow_cable;
 					printk(KERN_INFO "Unkown Plug In Cable type !\n");
+
+					if(ac_cable == cable_state_detect)
+					{
+						charger->cur_cable_type = ac_cable;
+						success = bq27541_battery_callback(ac_cable);
+#ifdef TOUCH_CALLBACK_ENABLED
+						touch_callback(ac_cable);
+#endif
+						printk(KERN_INFO "Change unknow type to ac\n");
+					}
+					else if(usb_cable == cable_state_detect)
+					{
+						charger->cur_cable_type = usb_cable;
+						success = bq27541_battery_callback(usb_cable);
+#ifdef TOUCH_CALLBACK_ENABLED
+						touch_callback(usb_cable);
+#endif
+						printk(KERN_INFO "Change unknow type to usb\n");
+					}
 				}
 			} else {
 				charger->cur_cable_type = unknow_cable;
@@ -762,6 +782,22 @@ static int cable_type_detect(void)
 
 	mutex_unlock(&charger->cable_lock);
 	return success;
+}
+
+int cable_detect_callback(unsigned cable_state)
+{
+	if(unknow_cable == charger->cur_cable_type)
+	{
+		int ret = 0;
+		cable_state_detect = cable_state;
+		ret = cable_type_detect();
+
+		return ret;
+	}
+	else
+	{
+		return -1;
+	}
 }
 
 static void inok_isr_work_function(struct work_struct *dat)

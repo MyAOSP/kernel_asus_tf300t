@@ -321,13 +321,19 @@ static void cpufreq_interactive_timer(unsigned long data)
 	}
 
 	if (new_freq < pcpu->target_freq) {
-		pcpu->target_freq = new_freq;
+		if ( pcpu->policy->cpu != 0 || ktime_to_us(ktime_sub(ktime_get(), freq_change_time_input)) >= min_sample_input_time)
+		{
+			pcpu->target_freq = new_freq;
+		}
 		spin_lock_irqsave(&down_cpumask_lock, flags);
 		cpumask_set_cpu(data, &down_cpumask);
 		spin_unlock_irqrestore(&down_cpumask_lock, flags);
 		queue_work(down_wq, &freq_scale_down_work);
 	} else {
-		pcpu->target_freq = new_freq;
+		if ( pcpu->policy->cpu != 0 || ktime_to_us(ktime_sub(ktime_get(), freq_change_time_input)) >= min_sample_input_time)
+		{
+			pcpu->target_freq = new_freq;
+		}
 		spin_lock_irqsave(&up_cpumask_lock, flags);
 		cpumask_set_cpu(data, &up_cpumask);
 		spin_unlock_irqrestore(&up_cpumask_lock, flags);
@@ -506,17 +512,7 @@ static int cpufreq_interactive_up_task(void *data)
 					max_freq = pjcpu->target_freq;
 			}
 
-			/* Only scale frequency when cpu is not cpu0 or touch event happens longer __cpufreq_driver_target(pcpu->policy,
-			 * then min_sample_input_time.*/
-			if (cpu!=0 || ktime_to_us(ktime_sub(ktime_get(), freq_change_time_input)) >=
-						min_sample_input_time) {
-				if (cpu == 0)
-					set_up2g0_delay(200);
-
-				 cpufreq_driver_target(pcpu->policy,
-						max_freq,
-						CPUFREQ_RELATION_H);
-			}
+			__cpufreq_driver_target(pcpu->policy, max_freq, CPUFREQ_RELATION_H);
 
 			mutex_unlock(&set_speed_lock);
 
@@ -562,17 +558,8 @@ static void cpufreq_interactive_freq_down(struct work_struct *work)
 			if (pjcpu->target_freq > max_freq)
 				max_freq = pjcpu->target_freq;
 		}
-		/* Only scale frequency when cpu is not cpu0 or touch event happens longer
-		 __cpufreq_driver_target(pcpu->policy, max_freq,
-		 * then min_sample_input_time.*/
-		if (cpu!=0 || ktime_to_us(ktime_sub(ktime_get(), freq_change_time_input)) >=  
-					min_sample_input_time) {
-			if (cpu == 0 )
-				set_up2g0_delay(200);
 
-			cpufreq_driver_target(pcpu->policy, max_freq,
-					CPUFREQ_RELATION_H);
-		}
+		__cpufreq_driver_target(pcpu->policy, max_freq, CPUFREQ_RELATION_H);
 
 		mutex_unlock(&set_speed_lock);
 		pcpu->freq_change_time_in_idle =
@@ -659,7 +646,6 @@ static void dbs_refresh_callback(struct work_struct *unused)
 	freq_change_time_input = ktime_get();
 	if (pcpu->policy->cur < pcpu->policy->max-200000) {//minus 200Mhz for now
 		pcpu->target_freq = pcpu->policy->max;
-		set_up2g0_delay(0);
 		__cpufreq_driver_target(pcpu->policy,
 						pcpu->target_freq,
 						CPUFREQ_RELATION_H);

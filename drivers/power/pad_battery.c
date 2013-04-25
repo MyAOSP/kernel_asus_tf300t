@@ -62,12 +62,6 @@ static int usb_on ;
 extern int asuspec_battery_monitor(char *cmd);
 static unsigned int 	battery_current;
 static unsigned int  battery_remaining_capacity;
-static unsigned ac_status_irq = 0;
-static unsigned ac_status = 0;
-static unsigned cable_status = 0;
-struct delayed_work ac_status_poll_work;
-struct delayed_work ac_status_poll_isr;
-static unsigned project_id = 0;
 module_param(battery_current, uint, 0644);
 module_param(battery_remaining_capacity, uint, 0644);
 enum {
@@ -141,7 +135,6 @@ static enum power_supply_property pad_properties[] = {
 };
 
 unsigned (*get_usb_cable_status_cb) (void);
-void battery_callback(unsigned usb_cable_state);
 
 void check_cabe_type(void)
 {
@@ -368,118 +361,6 @@ static void battery_status_poll(struct work_struct *work)
 	printk("battery_status_poll %u %u \n",BATTERY_POLLING_RATE,pad_device->battery_present);
 	if(pad_device->battery_present)
 		queue_delayed_work(battery_work_queue, &battery_device->status_poll_work,BATTERY_POLLING_RATE*HZ);
-}
-
-static irqreturn_t ac_status_detect_irq(void)
-{
-	int adapter_in = 0;
-
-	adapter_in = gpio_get_value(TEGRA_GPIO_PH5);
-
-	if(adapter_in != ac_status)
-	{
-		disable_irq_nosync(ac_status_irq);
-		schedule_delayed_work(&ac_status_poll_isr, 0.1*HZ);
-	}
-
-	printk("%s : adapter_in = %d, ac_status = %d\n", __func__, adapter_in, ac_status);
-
-	return IRQ_HANDLED;
-}
-
-static int ac_status_detect_resume(void)
-{
-	int adapter_in = 0;
-
-	adapter_in = gpio_get_value(TEGRA_GPIO_PH5);
-
-	if(adapter_in != ac_status)
-	{
-		cancel_delayed_work(&ac_status_poll_work);
-		schedule_delayed_work(&ac_status_poll_work, 0.1*HZ);
-	}
-
-	printk("%s : adapter_in = %d, ac_status = %d\n", __func__, adapter_in, ac_status);
-
-	return 0;
-}
-
-static int ac_status_irq_init(void)
-{
-	int ret = 0;
-
-	ac_status_irq = gpio_to_irq(TEGRA_GPIO_PH5);
-	ret = request_irq(ac_status_irq, ac_status_detect_irq, IRQF_TRIGGER_RISING|IRQF_TRIGGER_FALLING, "gpio_limit_set1_irq_handler", NULL);
-	schedule_delayed_work(&ac_status_poll_work, 0.2*HZ);
-
-	if (ret < 0) {
-		printk(KERN_ERR"%s: Could not request IRQ for the GPIO limit set1, irq = %d, ret = %d\n", __func__, ac_status_irq, ret);
-	}
-
-	printk(KERN_INFO"%s: request irq = %d, ret = %d\n", __func__, ac_status_irq, ret);
-
-	return ret;
-}
-
-static int ac_status_gpio_init(void)
-{
-	int ret = 0;
-
-	ret = gpio_request(TEGRA_GPIO_PH5, "LIMIT_SET1");
-
-	if (ret < 0)
-	{
-		printk(KERN_ERR "LIMIT_SET1 GPIO%d request fault!%d\n",TEGRA_GPIO_PH5, ret);
-	}
-
-	ret = gpio_direction_input(TEGRA_GPIO_PH5);
-
-	if (ret)
-	{
-		printk(KERN_ERR "gpio_direction_input failed for input %d\n", TEGRA_GPIO_PH5);
-	}
-
-	return ret;
-}
-
-static int ac_status_gpio_free(void)
-{
-	gpio_free(TEGRA_GPIO_PH5);
-}
-
-static int ac_status_irq_free(void)
-{
-	free_irq(ac_status_irq, NULL);
-}
-
-static int  ac_status_poll_work_isr(struct work_struct *work)
-{
-	cancel_delayed_work(&ac_status_poll_work);
-	schedule_delayed_work(&ac_status_poll_work, 0.1*HZ);
-	enable_irq(ac_status_irq);
-}
-
-static int  ac_status_poll(struct work_struct *work)
-{
-	int adapter_in = 0;
-
-	adapter_in = gpio_get_value(TEGRA_GPIO_PH5);
-
-	if(adapter_in)
-	{
-		cable_status |= 1<<1|1<<0; //0011;
-		ac_status = 1;
-	}
-	else
-	{
-		cable_status = 0;
-		ac_status = 0;
-	}
-	printk("%s : cable_status = %d\n", __func__, cable_status);
-
-	battery_callback(cable_status);
-
-	return cable_status;
 }
 
 static irqreturn_t battery_detect_isr(int irq, void *dev_id)
@@ -964,19 +845,7 @@ static int pad_probe(struct i2c_client *client,
 	}
 
 	init_docking_charging_irq();
-	if(project_id == TEGRA3_PROJECT_P1801)
-	{
-		ac_status_gpio_init();
-		INIT_DELAYED_WORK(&ac_status_poll_isr , ac_status_poll_work_isr);
-		INIT_DELAYED_WORK(&ac_status_poll_work , ac_status_poll);
-		ac_status_irq_init();
-		battery_cable_status = cable_status;
-	}
-	else
-	{
-		battery_cable_status = get_usb_cable_status();
-	}
-
+	battery_cable_status = get_usb_cable_status();
 	 cancel_delayed_work(&pad_device->status_poll_work);
 	 setup_detect_irq();
 	 setup_low_battery_irq();
@@ -1030,21 +899,11 @@ static int pad_suspend(struct i2c_client *client,
 
 static int pad_resume(struct i2c_client *client)
 {
-	u32 project_info = tegra3_get_project_id();
-
 	pad_device->battery_present =!(gpio_get_value(pad_device->gpio_battery_detect));
 	cancel_delayed_work(&pad_device->status_poll_work);
 	queue_delayed_work(battery_work_queue,&pad_device->status_poll_work,5*HZ);
-
-	if(TEGRA3_PROJECT_TF201 == project_info)
-	{
+	if(tegra3_get_project_id()==TEGRA3_PROJECT_TF201)
 		gpio_direction_output(TEGRA_GPIO_PU3, 1);
-	}
-	else if(TEGRA3_PROJECT_P1801 == project_info)
-	{
-		ac_status_detect_resume();
-	}
-
 	return 0;
 }
 #endif
@@ -1069,9 +928,8 @@ static struct i2c_driver pad_battery_driver = {
 static int __init pad_battery_init(void)
 {
 	int ret = 0;
-	project_id = tegra3_get_project_id();
 
-	if(project_id != TEGRA3_PROJECT_ME301T)
+	if(tegra3_get_project_id() != TEGRA3_PROJECT_ME301T)
 	{
 		ret = i2c_add_driver(&pad_battery_driver);
 		if (ret)
@@ -1084,14 +942,8 @@ module_init(pad_battery_init);
 
 static void __exit pad_battery_exit(void)
 {
-	if(project_id != TEGRA3_PROJECT_ME301T)
+	if(tegra3_get_project_id() != TEGRA3_PROJECT_ME301T)
 	{
-		if(project_id == TEGRA3_PROJECT_P1801)
-		{
-			ac_status_gpio_free();
-			ac_status_irq_free();
-		}
-
 		i2c_del_driver(&pad_battery_driver);
 	}
 }

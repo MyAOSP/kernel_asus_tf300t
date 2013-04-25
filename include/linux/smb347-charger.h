@@ -86,6 +86,7 @@ struct smb347_charger {
 };
 
 int smb347_battery_online(void);
+int cable_detect_callback(unsigned cable_state);
 typedef void (*callback_t)(enum usb_otg_state otg_state, void *args);
 /*
  * Register callback function for the client.

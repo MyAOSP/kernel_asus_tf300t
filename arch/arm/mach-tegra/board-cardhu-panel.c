@@ -627,6 +627,7 @@ static int cardhu_hdmi_disable(void)
                         && scalar_update_status!=2
                         && scalar_update_status!=-1
                         && !isRecording){
+                msleep(300);
                 gpio_set_value(EN_VDD_BL, 0);
         }
 
@@ -1711,6 +1712,7 @@ int __init cardhu_panel_init(void)
 		cardhu_fb_data.yres = 1080;
 
 		cardhu_disp1_out_P1801.sd_settings->panel_min_brightness = 77;
+		cardhu_disp1_out_P1801.sd_settings->enable = 0;
 
 		cardhu_disp1_pdata.default_out = &cardhu_disp1_out_P1801;
 		cardhu_disp1_device.resource	= cardhu_disp1_resources_P1801;

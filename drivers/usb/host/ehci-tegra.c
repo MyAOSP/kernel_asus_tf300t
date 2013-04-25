@@ -46,6 +46,7 @@ static unsigned  int gpio_dock_in_irq = 0;
 static struct tegra_ehci_hcd *modem_ehci_tegra;
 
 #define TEGRA_USB_DMA_ALIGN 32
+static struct platform_device *dock_port_device;
 static struct platform_device *modem_port_device;
 
 struct tegra_ehci_hcd {
@@ -133,6 +134,12 @@ void tegra_ehci_modem_port_host_reregister(void)
 	modem_port_device = tegra_cardhu_usb_utmip_host_register();
 }
 EXPORT_SYMBOL(tegra_ehci_modem_port_host_reregister);
+
+struct platform_device *dock_port_device_info(void)
+{
+	return dock_port_device;
+}
+EXPORT_SYMBOL(dock_port_device_info);
 
 static void free_align_buffer(struct urb *urb)
 {
@@ -575,6 +582,7 @@ static int tegra_ehci_probe(struct platform_device *pdev)
 		usb3_ehci_handle = hcd;
 		usb3_init = 1;
 		gpio_dock_in_irq_init(hcd);
+		dock_port_device = pdev;
 	}
 
 	err = tegra_usb_phy_power_on(tegra->phy);
@@ -693,6 +701,7 @@ static int tegra_ehci_remove(struct platform_device *pdev)
 		free_irq(gpio_dock_in_irq, hcd);
 		usb3_ehci_handle = NULL;
 		usb3_init = 0;
+		dock_port_device = NULL;
 	}
 
 	//if (tegra->irq)
@@ -730,6 +739,7 @@ static void tegra_ehci_hcd_shutdown(struct platform_device *pdev)
 		free_irq(gpio_dock_in_irq, hcd);
 		usb3_ehci_handle = NULL;
 		usb3_init = 0;
+		dock_port_device = NULL;
 	}
 
 	if (hcd->driver->shutdown)

@@ -1906,7 +1906,7 @@ static int rt5631_hifi_pcm_params(struct snd_pcm_substream *substream,
 	if (SNDRV_PCM_STREAM_CAPTURE == stream) {
 		if (rt5631->dmic_used_flag)
 			rt5631_set_dmic_params(codec, params);
-		if(headset_alive)
+		if(headset_alive && !rt5631->dmic_used_flag)
 			rt5631_close_dmic(codec);
 	}
 

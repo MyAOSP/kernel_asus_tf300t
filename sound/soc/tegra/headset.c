@@ -1,3 +1,4 @@
+
 /*
  * Headset device detection driver.
  *
@@ -36,6 +37,7 @@
 #include <asm/uaccess.h>
 #include <asm/string.h>
 #include <sound/soc.h>
+#include <linux/wakelock.h>
 #include "../gpio-names.h"
 #include <mach/board-cardhu-misc.h>
 #include "../codecs/wm8903.h"
@@ -58,6 +60,7 @@ static void 		detection_work(struct work_struct *work);
 static int 	jack_config_gpio(void);
 static irqreturn_t 	lineout_irq_handler(int irq, void *dev_id);
 static void 		lineout_work_queue(struct work_struct *work);
+static void		hook_work_queue(struct work_struct *work);
 static int 	lineout_config_gpio(void);
 static void 		detection_work(struct work_struct *work);
 static int 	btn_config_gpio(void);
@@ -113,12 +116,14 @@ EXPORT_SYMBOL(isHpDetecting);
 static struct workqueue_struct *g_detection_work_queue;
 static DECLARE_WORK(g_detection_work, detection_work);
 
+struct wake_lock hp_detect_wakelock;
 static bool console_disable;
 extern struct snd_soc_codec *rt5631_audio_codec;
 extern struct snd_soc_codec *wm8903_codec;
 extern struct snd_soc_codec *rt5640_audio_codec;
 struct work_struct headset_work;
 struct work_struct lineout_work;
+struct work_struct hook_work;
 struct snd_soc_codec *global_codec;
 bool need_spk;
 extern int PRJ_ID;
@@ -228,6 +233,8 @@ static ssize_t headset_state_show(struct switch_dev *sdev, char *buf)
 
 static void insert_headset(void)
 {
+	unsigned int hook_irq = -1;
+
 	if(gpio_get_value(hs_data->lineout_gpio) == 0 &&
 			(project_info == TEGRA3_PROJECT_ME301T ||
 			 project_info == TEGRA3_PROJECT_ME301TL) ){
@@ -240,6 +247,8 @@ static void insert_headset(void)
 		/* disable irq and irq_wake to avoid system can't suspend */
 		disable_irq(hs_data->irq);
 		disable_irq_wake(hs_data->irq);
+		hook_irq = TEGRA_GPIO_TO_IRQ(HOOK_GPIO);
+		enable_irq(hook_irq);
 		hs_micbias_power(ON);
 	}else if(gpio_get_value(HOOK_GPIO)
 			/*|| (factory_mode && (force_headphone == FORCE_HEADPHONE))*/ ){
@@ -282,6 +291,7 @@ static void insert_headset(void)
 	}
 	hs_data->debouncing_time = ktime_set(0, 20000000); /* 20 ms */
 }
+EXPORT_SYMBOL(insert_headset);
 
 static void remove_headset(void)
 {
@@ -304,6 +314,7 @@ static void detection_work(struct work_struct *work)
 	int cable_in1;
 	int mic_in = 0;
 
+	wake_lock(&hp_detect_wakelock);
 	hs_micbias_power(ON);
 	isHpDetecting = true;
 
@@ -340,11 +351,13 @@ static void detection_work(struct work_struct *work)
 		goto closed_micbias;
 	}
 	isHpDetecting = false;
+	wake_unlock(&hp_detect_wakelock);
 	return;
 
 closed_micbias:
 	isHpDetecting = false;
 	hs_micbias_power(OFF);
+	wake_unlock(&hp_detect_wakelock);
 	return;
 }
 
@@ -431,9 +444,19 @@ static int btn_config_gpio()
 		hook_irq = TEGRA_GPIO_TO_IRQ(HOOK_GPIO);
 		ret = request_irq(hook_irq, hook_irq_handler,
 				IRQF_TRIGGER_FALLING, "hook_detect", NULL);
+		disable_irq(hook_irq);
 	}
 
 	return 0;
+}
+
+static void hook_work_queue(struct work_struct *work)
+{
+	unsigned int hook_irq = -1;
+
+	hook_irq = TEGRA_GPIO_TO_IRQ(HOOK_GPIO);
+
+	disable_irq(hook_irq);
 }
 
 static void lineout_work_queue(struct work_struct *work)
@@ -532,12 +555,12 @@ static int switch_config_gpio()
 
 static irqreturn_t hook_irq_handler(int irq, void *dev_id)
 {
-	printk("%s+++++++++++\n", __func__);
 	if(debugboard_alive){
 		gpio_direction_output(UART_HEADPHONE_SWITCH, 1);
 		/* Enable irq and irq_wake for Headset/Headphone detection */
 		enable_irq(hs_data->irq);
 		enable_irq_wake(hs_data->irq);
+		schedule_work(&hook_work);
 		debugboard_alive = false;
 	}
 
@@ -717,8 +740,12 @@ static int __init headset_init(void)
 			project_info == TEGRA3_PROJECT_ME301TL ||
 			project_info == TEGRA3_PROJECT_ME570T)
 		switch_config_gpio(); /*Config uart and headphone switch*/
-
+	wake_lock_init(&hp_detect_wakelock, WAKE_LOCK_SUSPEND,
+		"headset detection");
 	INIT_WORK(&lineout_work, lineout_work_queue);
+	if (project_info ==  TEGRA3_PROJECT_ME301T ||
+		project_info == TEGRA3_PROJECT_ME301TL)
+		INIT_WORK(&hook_work, hook_work_queue);
 
 	switch (project_info) {
 		case TEGRA3_PROJECT_TF201:
@@ -766,6 +793,7 @@ static void __exit headset_exit(void)
 	gpio_free(HOOK_GPIO);
 	gpio_free(LINEOUT_GPIO);
 
+	wake_lock_destroy(&hp_detect_wakelock);
 	free_irq(hs_data->irq, 0);
 	destroy_workqueue(g_detection_work_queue);
 	switch_dev_unregister(&hs_data->sdev);

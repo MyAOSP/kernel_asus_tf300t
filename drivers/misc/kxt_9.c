@@ -109,7 +109,62 @@ struct KXT_9_data {
 	u8 resume[RESUME_ENTRIES];
 	int res_interval;
 	int irq;
+
+	/* for set accel bias */
+	int raw_xyz[3];
+	int offset[3];
+	int sensitivity[3];
+	bool fLoadConfig;
 };
+
+static int access_calibration_file(int *offset, int *sensitivity)
+{
+	char buf[256];
+	int ii, ret = 0;
+	struct file *fp = NULL;
+	mm_segment_t oldfs;
+	int max[3] = {0};
+	int min[3] = {0};
+
+	oldfs=get_fs();
+	set_fs(get_ds());
+	memset(buf, 0, sizeof(u8)*256);
+
+	fp=filp_open(KXTF9_CALIBRATION_PATH, O_RDONLY, 0);
+	if (!IS_ERR(fp)) {
+		printk("kxtf9 open config file success\n");
+		ret = fp->f_op->read(fp, buf, sizeof(buf), &fp->f_pos);
+
+		printk("kxtf9 config content is :%s\n", buf);
+		sscanf(buf,"%6d %6d %6d %6d %6d %6d\n",
+			&max[0], &min[0], &max[1], &min[1], &max[2], &min[2]);
+
+		for(ii = 0; ii < 3; ii++) {
+			sensitivity[ii] = (max[ii] -min[ii]) >> 1;
+			offset[ii] = min[ii] + sensitivity[ii];
+		}
+		printk("kxtf9: Offset: %d, %d, %d\nkxtf9: Sensitivity: %d, %d, %d\n",
+			offset[0], offset[1], offset[2],
+			sensitivity[0], sensitivity[1], sensitivity[2]);
+
+		filp_close(fp, NULL);
+		set_fs(oldfs);
+		return 0;
+	}
+	else {
+
+		for(ii = 0; ii < 3; ii++) {
+			offset[ii] = 0;
+			sensitivity[ii] = 1024;
+		}
+
+		printk("No kxtf9 calibration file\n");
+
+		set_fs(oldfs);
+		return -1;
+	}
+
+}
 
 static int KXT_9_i2c_read(struct KXT_9_data *tf9, u8 addr, u8 *data, int len)
 {
@@ -465,7 +520,11 @@ int KXT_9_update_odr(struct KXT_9_data *tf9, int poll_interval)
 	}
 
 	if (atomic_read(&tf9->enabled)) {
+		tf9->resume[RES_CTRL_REG1] &= (~PC1_ON);
+		KXT_9_i2c_write(tf9, CTRL_REG1, &tf9->resume[RES_CTRL_REG1], 1);
 		err = KXT_9_i2c_write(tf9, DATA_CTRL, &config, 1);
+		tf9->resume[RES_CTRL_REG1] |= PC1_ON;
+		KXT_9_i2c_write(tf9, CTRL_REG1, &tf9->resume[RES_CTRL_REG1], 1);
 		if (err < 0)
 			return err;
 		/*
@@ -490,6 +549,22 @@ static int KXT_9_get_acceleration_data(struct KXT_9_data *tf9, int *xyz)
 	u8 acc_data[6];
 	/* x,y,z hardware values */
 	int hw_d[3];
+	int i =0;
+	long tmp_value = 0;
+
+	if (!tf9->fLoadConfig)
+	{
+		printk("Read g sensor calibration file\n");
+		err = access_calibration_file(tf9->offset, tf9->sensitivity);
+		if (err < 0)
+			printk("in %s, read g sensor calibration file FAIL\n", __func__);
+
+		printk("offset: (%d, %d, %d), sensitivity: (%d, %d, %d)\n",
+			tf9->offset[0], tf9->offset[1], tf9->offset[2],
+			tf9->sensitivity[0], tf9->sensitivity[1], tf9->sensitivity[2]);
+
+		tf9->fLoadConfig = true;
+	}
 
 	err = KXT_9_i2c_read(tf9, XOUT_L, acc_data, 6);
 	if (err < 0)
@@ -513,6 +588,33 @@ static int KXT_9_get_acceleration_data(struct KXT_9_data *tf9, int *xyz)
 		  : (hw_d[tf9->pdata->axis_map_y]));
 	xyz[2] = ((tf9->pdata->negate_z) ? (-hw_d[tf9->pdata->axis_map_z])
 		  : (hw_d[tf9->pdata->axis_map_z]));
+
+	//dev_info(&tf9->client->dev, "before add bias, x:%d y:%d z:%d\n", xyz[0], xyz[1], xyz[2]);
+
+	for (i = 0; i < 3; i++)
+	{
+		tf9->raw_xyz[i] = xyz[i];
+
+		tmp_value = xyz[i] - tf9->offset[i];
+
+		if(tmp_value < 0) {
+			tmp_value = -tmp_value;
+			tmp_value = (long)(tmp_value << 10);
+
+			if(tf9->sensitivity[i] != 0)
+				xyz[i] = (int)(tmp_value / tf9->sensitivity[i]);
+
+			xyz[i] = -xyz[i];
+		} else {
+			tmp_value = (long)(tmp_value << 10);
+
+			if(tf9->sensitivity[i] != 0)
+				xyz[i] = (int)(tmp_value / tf9->sensitivity[i]);
+		}
+		/* if sensitivity = 0, xyz[] do not feed bias */
+	}
+
+	//dev_info(&tf9->client->dev, "after add bias, x:%d y:%d z:%d\n", xyz[0], xyz[1], xyz[2]);
 
 	/*** DEBUG OUTPUT - REMOVE ***/
 	//dev_info(&tf9->client->dev, "x:%d y:%d z:%d\n", xyz[0], xyz[1], xyz[2]);
@@ -849,8 +951,9 @@ static int __devinit KXT_9_probe(struct i2c_client *client,
 						const struct i2c_device_id *id)
 {
 	printk(KERN_INFO "%s+ #####\n", __func__);
-	int err = -1;
+	int ii, err = -1;
 	struct KXT_9_data *tf9 = kzalloc(sizeof(*tf9), GFP_KERNEL);
+
 	if (tf9 == NULL) {
 		dev_err(&client->dev,
 			"failed to allocate memory for module data\n");
@@ -870,6 +973,15 @@ static int __devinit KXT_9_probe(struct i2c_client *client,
 	mutex_init(&tf9->lock);
 	mutex_lock(&tf9->lock);
 	tf9->client = client;
+
+	/* init variables for bias setting */
+	tf9->fLoadConfig = false;
+	for(ii = 0; ii < 3; ii++) {
+		tf9->raw_xyz[ii] = 0;
+		tf9->offset[ii] = 0;
+		tf9->sensitivity[ii] = 0;
+	}
+
 	i2c_set_clientdata(client, tf9);
 
 	INIT_WORK(&tf9->irq_work, KXT_9_irq_work_func);

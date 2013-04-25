@@ -1657,8 +1657,13 @@ static bool _tegra_dc_enable(struct tegra_dc *dc)
 		do_gettimeofday(&t_resume);
 		diff_msec = ((t_resume.tv_sec - t_suspend.tv_sec) * 1000000 +(t_resume.tv_usec - t_suspend.tv_usec)) / 1000;
 		printk("Disp: diff_msec= %d\n", diff_msec);
-		if((diff_msec < 1000) && (diff_msec >= 0))
-			msleep(1000 - diff_msec);
+                if(tegra3_get_project_id() != TEGRA3_PROJECT_P1801) {
+                        if((diff_msec < 1000) && (diff_msec >= 0))
+                                msleep(1000 - diff_msec);
+                } else {
+                        if((diff_msec < 500) && (diff_msec >= 0))
+                                msleep(500 - diff_msec);
+                }
 	}
 
 	if (dc->mode.pclk == 0)
@@ -1807,9 +1812,9 @@ void tegra_dc_blank(struct tegra_dc *dc)
 
 static void _tegra_dc_disable(struct tegra_dc *dc)
 {
-	if (dc->ndev->id == 0) {
-		do_gettimeofday(&t_suspend);
-	}
+        if (dc->ndev->id == 0 && tegra3_get_project_id() != TEGRA3_PROJECT_P1801) {
+               do_gettimeofday(&t_suspend);
+        }
 
 	if (dc->out->flags & TEGRA_DC_OUT_ONE_SHOT_MODE) {
 		mutex_lock(&dc->one_shot_lock);
@@ -1831,6 +1836,9 @@ static void _tegra_dc_disable(struct tegra_dc *dc)
 		clk_disable(dc->min_emc_clk);
 	}
 
+        if (dc->ndev->id == 0 && tegra3_get_project_id() == TEGRA3_PROJECT_P1801) {
+               do_gettimeofday(&t_suspend);
+        }
 }
 
 void tegra_dc_disable(struct tegra_dc *dc)
