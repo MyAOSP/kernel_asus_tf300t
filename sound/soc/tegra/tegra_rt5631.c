@@ -23,7 +23,10 @@
 #include "tegra_pcm.h"
 #include "tegra_asoc_utils.h"
 #include <mach/board-cardhu-misc.h>
+#include <mach/tegra_asoc_pdata.h>
 
+#include "../drivers/input/asusec/asusdec.h"
+#include "../gpio-names.h"
 #define DRV_NAME "tegra-snd-codec"
 
 struct tegra_rt5631 {
@@ -35,6 +38,12 @@ struct tegra_rt5631 {
 	int jack_status;
 #endif
 };
+extern bool headset_alive;
+extern bool lineout_alive;
+extern struct snd_soc_codec *rt5631_audio_codec;
+static bool audio_dock_in = false;
+static bool audio_stand_in = false;
+extern void audio_dock_init(void);
 
 static int tegra_rt5631_hw_params(struct snd_pcm_substream *substream,
 					struct snd_pcm_hw_params *params)
@@ -45,6 +54,7 @@ static int tegra_rt5631_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_codec *codec = rtd->codec;
 	struct snd_soc_card *card = codec->card;
 	struct tegra_rt5631 *machine = snd_soc_card_get_drvdata(card);
+
 	int srate, mclk, i2s_daifmt;
 	int err;
 
@@ -114,6 +124,7 @@ static const struct snd_soc_dapm_widget cardhu_dapm_widgets[] = {
 	SND_SOC_DAPM_HP("Headphone Jack", NULL),
 	SND_SOC_DAPM_MIC("Mic Jack", NULL),
 	SND_SOC_DAPM_MIC("Int Mic", NULL),
+	SND_SOC_DAPM_SPK("AUX", NULL),
 
 };
 
@@ -132,6 +143,7 @@ static const struct snd_soc_dapm_route cardhu_audio_map[] = {
 	{"MIC1", NULL, "Mic Bias1"},
 	{"Mic Bias1", NULL, "Mic Jack"},
 	{"DMIC", NULL, "Int Mic"},
+	{"AUX", NULL, "AUXO2"},
 };
 
 static const struct snd_kcontrol_new cardhu_controls[] = {
@@ -139,6 +151,7 @@ static const struct snd_kcontrol_new cardhu_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Headphone Jack"),
 	SOC_DAPM_PIN_SWITCH("Mic Jack"),
 	SOC_DAPM_PIN_SWITCH("Int Mic"),
+	SOC_DAPM_PIN_SWITCH("AUX"),
 };
 
 static const struct snd_kcontrol_new tegra_rt5631_default_controls[] = {
@@ -188,6 +201,7 @@ static int tegra_rt5631_init(struct snd_soc_pcm_runtime *rtd)
 	snd_soc_dapm_disable_pin(dapm, "Mic Jack");
 	snd_soc_dapm_disable_pin(dapm, "Headphone Jack");
 	snd_soc_dapm_disable_pin(dapm, "Int Spk");
+	snd_soc_dapm_disable_pin(dapm, "AUX");
 	snd_soc_dapm_sync(dapm);
 
 	return 0;
@@ -225,9 +239,16 @@ static __devinit int tegra_rt5631_driver_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &snd_soc_tegra_rt5631;
 	struct tegra_rt5631 *machine;
+	struct tegra_asoc_platform_data *pdata;
 
 	int ret;
 	printk("%s+\n", __func__);
+
+	pdata = pdev->dev.platform_data;
+	if (!pdata) {
+		dev_err(&pdev->dev, "No platform data supplied\n");
+		return -EINVAL;
+	}
 
 	machine = kzalloc(sizeof(struct tegra_rt5631), GFP_KERNEL);
 	if (!machine) {
@@ -235,7 +256,7 @@ static __devinit int tegra_rt5631_driver_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	ret = tegra_asoc_utils_init(&machine->util_data, &pdev->dev);
+	ret = tegra_asoc_utils_init(&machine->util_data, &pdev->dev, card);
 	if (ret)
 		goto err_free_machine;
 
@@ -249,9 +270,22 @@ static __devinit int tegra_rt5631_driver_probe(struct platform_device *pdev)
 			ret);
 		goto err_fini_utils;
 	}
+
+#ifndef CONFIG_ARCH_TEGRA_2x_SOC
+	ret = tegra_asoc_utils_set_parent(&machine->util_data,
+				pdata->i2s_param[HIFI_CODEC].is_i2s_master);
+	if (ret) {
+		dev_err(&pdev->dev, "tegra_asoc_utils_set_parent failed (%d)\n",
+			ret);
+		goto err_unregister_card;
+	}
+#endif
+
 	printk("%s-\n", __func__);
 	return 0;
 
+err_unregister_card:
+	snd_soc_unregister_card(card);
 err_fini_utils:
 	tegra_asoc_utils_fini(&machine->util_data);
 err_free_machine:
@@ -287,7 +321,7 @@ static int __init tegra_rt5631_modinit(void)
 {
 	printk(KERN_INFO "%s+ #####\n", __func__);
 	int ret = 0;
-	 u32 project_info = tegra3_get_project_id();
+	u32 project_info = tegra3_get_project_id();
 
 	if(project_info == TEGRA3_PROJECT_TF201 || project_info == TEGRA3_PROJECT_TF300TG ||
                 project_info == TEGRA3_PROJECT_TF700T || project_info == TEGRA3_PROJECT_TF300TL)
@@ -299,6 +333,7 @@ static int __init tegra_rt5631_modinit(void)
 	}
 
 	ret = platform_driver_register(&tegra_rt5631_driver);
+	audio_dock_init();
 
 	printk(KERN_INFO "%s- #####\n", __func__);
 	return ret;

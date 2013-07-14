@@ -69,9 +69,9 @@
 #include <hndrte_armtrap.h>
 #endif /* DHD_DEBUG_TRAP */
 
-#define QLEN		256	/* bulk rx and tx queue lengths */
-#define FCHI		(QLEN - 10)
-#define FCLOW		(FCHI / 2)
+#define QLEN		2048	/* bulk rx and tx queue lengths */
+#define FCHI		(QLEN - 256)
+#define FCLOW		(FCHI -256)
 #define PRIOMASK	7
 
 #define TXRETRIES	2	/* # of retries for tx frames */
@@ -345,10 +345,8 @@ static const uint firstread = DHD_FIRSTREAD;
 #define HDATLEN (firstread - (SDPCM_HDRLEN))
 
 /* Retry count for register access failures */
-static const uint retry_limit = 20;
+static const uint retry_limit = 2;
 
-static int sdio_error_cnt = 0;
-extern char iface_name[IFNAMSIZ];
 /* Force even SD lengths (some host controllers mess up on odd bytes) */
 static bool forcealign;
 
@@ -393,8 +391,6 @@ do { \
 	do { \
 		regvar = R_REG(bus->dhd->osh, regaddr); \
 	} while (bcmsdh_regfail(bus->sdh) && (++retryvar <= retry_limit)); \
-	if(retryvar > 1)  \
-		DHD_ERROR(("%s: regvar[ %d ], retryvar[ %d ], regfails[ %d ], bcmsdh_regfail[ %d ] \n",__FUNCTION__,regvar, retryvar ,bus->regfails, bcmsdh_regfail(bus->sdh))); \
 	if (retryvar) { \
 		bus->regfails += (retryvar-1); \
 		if (retryvar > retry_limit) { \
@@ -496,29 +492,6 @@ dhdsdio_set_siaddr_window(dhd_bus_t *bus, uint32 address)
 	return err;
 }
 
-/* Check SDIO status */
-static void
-dhdsdio_htclk_check(int ret)
-{
-	struct net_device *ndev;
-
-	if (ret == BCME_ERROR) {
-		if (sdio_error_cnt < 10) {
-			sdio_error_cnt++ ;
-			printf("%s: ret = %d, sdio_error_cnt = %d\n", __FUNCTION__, ret, sdio_error_cnt);
-		} else {
-			if ((ndev = dev_get_by_name (&init_net, iface_name)) != NULL) {
-				sdio_error_cnt = 0;
-				printf("%s: Event HANG send up\n", __FUNCTION__);
-				net_os_send_hang_message(ndev);
-			}
-		}
-
-	} else if (sdio_error_cnt > 0) {
-		sdio_error_cnt-- ;
-		printf("%s: ret = %d, sdio_error_cnt = %d\n", __FUNCTION__, ret, sdio_error_cnt);
-	}
-}
 
 /* Turn backplane clock on or off */
 static int
@@ -596,7 +569,7 @@ dhdsdio_htclk(dhd_bus_t *bus, bool on, bool pendok)
 			          !SBSDIO_CLKAV(clkctl, bus->alp_only)), PMU_MAX_TRANSITION_DLY);
 		}
 		if (err) {
-			DHD_ERROR(("%s: HT Avail request error2: %d\n", __FUNCTION__, err));
+			DHD_ERROR(("%s: HT Avail request error: %d\n", __FUNCTION__, err));
 			return BCME_ERROR;
 		}
 		if (!SBSDIO_CLKAV(clkctl, bus->alp_only)) {
@@ -760,7 +733,6 @@ dhdsdio_clkctl(dhd_bus_t *bus, uint target, bool pendok)
 			dhdsdio_sdclk(bus, TRUE);
 		/* Now request HT Avail on the backplane */
 		ret = dhdsdio_htclk(bus, TRUE, pendok);
-		dhdsdio_htclk_check(ret);
 		if (ret == BCME_OK) {
 			dhd_os_wd_timer(bus->dhd, dhd_watchdog_ms);
 			bus->activity = TRUE;
@@ -769,25 +741,21 @@ dhdsdio_clkctl(dhd_bus_t *bus, uint target, bool pendok)
 
 	case CLK_SDONLY:
 		/* Remove HT request, or bring up SD clock */
-		if (bus->clkstate == CLK_NONE) {
+		if (bus->clkstate == CLK_NONE)
 			ret = dhdsdio_sdclk(bus, TRUE);
-		} else if (bus->clkstate == CLK_AVAIL) {
+		else if (bus->clkstate == CLK_AVAIL)
 			ret = dhdsdio_htclk(bus, FALSE, FALSE);
-			dhdsdio_htclk_check(ret);
-		} else {
+		else
 			DHD_ERROR(("dhdsdio_clkctl: request for %d -> %d\n",
 			           bus->clkstate, target));
-		}
 		if (ret == BCME_OK)
 			dhd_os_wd_timer(bus->dhd, dhd_watchdog_ms);
 		break;
 
 	case CLK_NONE:
 		/* Make sure to remove HT request */
-		if (bus->clkstate == CLK_AVAIL) {
+		if (bus->clkstate == CLK_AVAIL)
 			ret = dhdsdio_htclk(bus, FALSE, FALSE);
-			dhdsdio_htclk_check(ret);
-		}
 		/* Now remove the SD clock */
 		ret = dhdsdio_sdclk(bus, FALSE);
 		dhd_os_wd_timer(bus->dhd, 0);
@@ -1317,7 +1285,8 @@ dhd_bus_txctl(struct dhd_bus *bus, uchar *msg, uint msglen)
 			DHD_INFO(("%s: ctrl_frame_stat == FALSE\n", __FUNCTION__));
 			ret = 0;
 		} else {
-			DHD_INFO(("%s: ctrl_frame_stat == TRUE\n", __FUNCTION__));
+			if (!bus->dhd->hang_was_sent)
+				DHD_ERROR(("%s: ctrl_frame_stat == TRUE\n", __FUNCTION__));
 			ret = -1;
 		}
 	}
@@ -4802,7 +4771,8 @@ dhdsdio_chipmatch(uint16 chipid)
 
 static void *
 dhdsdio_probe(uint16 venid, uint16 devid, uint16 bus_no, uint16 slot,
-	uint16 func, uint bustype, void *regsva, osl_t * osh, void *sdh)
+	uint16 func, uint bustype, void *regsva, osl_t * osh, void *sdh,
+	void *dev)
 {
 	int ret;
 	dhd_bus_t *bus;
@@ -4819,7 +4789,7 @@ dhdsdio_probe(uint16 venid, uint16 devid, uint16 bus_no, uint16 slot,
 	sd1idle = TRUE;
 	dhd_readahead = TRUE;
 	retrydata = FALSE;
-	dhd_doflow = FALSE;
+	dhd_doflow = TRUE;
 	dhd_dongle_memsize = 0;
 	dhd_txminmax = DHD_TXMINMAX;
 
@@ -4910,7 +4880,7 @@ dhdsdio_probe(uint16 venid, uint16 devid, uint16 bus_no, uint16 slot,
 	}
 
 	/* Attach to the dhd/OS/network interface */
-	if (!(bus->dhd = dhd_attach(osh, bus, SDPCM_RESERVE))) {
+	if (!(bus->dhd = dhd_attach(osh, bus, SDPCM_RESERVE, dev))) {
 		DHD_ERROR(("%s: dhd_attach failed\n", __FUNCTION__));
 		goto fail;
 	}

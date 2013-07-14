@@ -47,8 +47,8 @@
 #define AL3010_IOCTL_START_NORMAL 1
 #define AL3010_IOCTL_END 0
 
-#define START_NORMAL	(HZ)
-#define START_HEAVY	(HZ)
+#define START_NORMAL    (HZ)
+#define START_HEAVY     (HZ)
 
 #define CAL_ALS_PATH "/data/lightsensor/AL3010_Config.ini"
 
@@ -66,7 +66,7 @@ static struct workqueue_struct *sensor_work_queue;
 struct i2c_client *al3010_client;
 
 static struct timeval t_first_poll_time;
-static bool light_sensor_ready = true;
+static bool light_sensor_ready = false;
 static bool catch_first_poll_time = false;
 static int time_for_sensor_ready = 100; //milisecond
 
@@ -105,7 +105,7 @@ static int last_report_lux = -1;
  */
 static void control_als_cam_2v85(int enable){
 	if( tegra3_get_project_id() == TEGRA3_PROJECT_TF201 ){
-		tegra_gpio_enable(ALS_CAM_POWER_2V85_EN_GPIO);
+//		tegra_gpio_enable(ALS_CAM_POWER_2V85_EN_GPIO);
 		int ret=0;
 		ret = gpio_request(ALS_CAM_POWER_2V85_EN_GPIO, "gpio_pr7");
 		if (ret < 0){
@@ -477,18 +477,18 @@ static ssize_t al3010_show_default_lux(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 
-	al3010_later_init(client);
+        al3010_later_init(client);
     int show_lux_value = al3010_get_adc_value(client);
     int show_default_lux_value = (show_lux_value*calibration_regs)/default_calibration_regs;
 	return sprintf(buf, "%d\n", show_default_lux_value);
 }
 
-static SENSOR_DEVICE_ATTR(show_reg, 0755, al3010_show_reg, NULL, 1);
-static SENSOR_DEVICE_ATTR(show_lux, 0755, al3010_show_lux, NULL, 2);
-static SENSOR_DEVICE_ATTR(lightsensor_status, 0755, al3010_show_power_state, NULL, 3);
-static SENSOR_DEVICE_ATTR(refresh_cal, 0755, al3010_refresh_calibration, NULL, 4);
-static SENSOR_DEVICE_ATTR(show_revise_lux, 0755, al3010_show_revise_lux, NULL, 5);
-static SENSOR_DEVICE_ATTR(show_default_lux, 0755, al3010_show_default_lux, NULL, 6);
+static SENSOR_DEVICE_ATTR(show_reg, 0644, al3010_show_reg, NULL, 1);
+static SENSOR_DEVICE_ATTR(show_lux, 0644, al3010_show_lux, NULL, 2);
+static SENSOR_DEVICE_ATTR(lightsensor_status, 0644, al3010_show_power_state, NULL, 3);
+static SENSOR_DEVICE_ATTR(refresh_cal, 0644, al3010_refresh_calibration, NULL, 4);
+static SENSOR_DEVICE_ATTR(show_revise_lux, 0644, al3010_show_revise_lux, NULL, 5);
+static SENSOR_DEVICE_ATTR(show_default_lux, 0644, al3010_show_default_lux, NULL, 6);
 
 static struct attribute *al3010_attributes[] = {
 	&sensor_dev_attr_show_reg.dev_attr.attr,

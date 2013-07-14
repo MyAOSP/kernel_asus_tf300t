@@ -3,7 +3,7 @@
  *
  * CPU initialization routines for Tegra SoCs
  *
- * Copyright (c) 2009-2011, NVIDIA Corporation.
+ * Copyright (c) 2009-2012, NVIDIA Corporation. All rights reserved.
  * Copyright (c) 2011 Google, Inc.
  * Author: Colin Cross <ccross@android.com>
  *         Gary King <gking@nvidia.com>
@@ -48,7 +48,6 @@
  *	 of secondary CPUs.
  */
 ENTRY(tegra_secondary_startup)
-	bl	tegra_enable_coresite
 	bl	__invalidate_cpu_state
 	b	secondary_startup
 ENDPROC(tegra_secondary_startup)
@@ -63,7 +62,6 @@ ENDPROC(tegra_secondary_startup)
  *	  re-enabling sdram.
  */
 ENTRY(tegra_resume)
-	bl	tegra_enable_coresite
 	bl	__invalidate_cpu_state
 
 	cpu_id	r0
@@ -87,8 +85,9 @@ ENTRY(tegra_resume)
 	str	r1, [r0]
 
 #ifdef CONFIG_TRUSTED_FOUNDATIONS
-	/* wake up (should have specified args?) */
-	bl	tegra_generic_smc
+	/* wake up */
+	mov	r0, #0x00000003
+	bl	tegra_generic_smc_local
 #endif
 
 	b	tegra_cpu_resume_phys
@@ -166,12 +165,6 @@ tegra_invalidate_l1:
 	isb
 	mov	pc, lr
 
-	/* Enable Coresight access on cpu */
-tegra_enable_coresite:
-	mov32	r0, 0xC5ACCE55
-	mcr	p14, 0, r0, c7, c12, 6
-	mov	pc, lr
-
 /*
  * __tegra_cpu_reset_handler_halt_failed:
  *
@@ -204,8 +197,6 @@ ENTRY(__tegra_cpu_reset_handler_start)
 ENTRY(__tegra_cpu_reset_handler)
 
 #if DEBUG_CPU_RESET_HANDLER
-	mov32	r0, 0xC5ACCE55
-	mcr	p14, 0, r0, c7, c12, 6		@ Enable CoreSight access
 	b	.
 #endif
 #ifndef CONFIG_TRUSTED_FOUNDATIONS
@@ -340,6 +331,6 @@ __tegra_cpu_reset_handler_data:
 	.rept	TEGRA_RESET_DATA_SIZE
 	.long	0
 	.endr
-	.size	__tegra_cpu_reset_handler_data, .-tegra_cpu_reset_handler_data
+	.size	__tegra_cpu_reset_handler_data, . - __tegra_cpu_reset_handler_data
 	.align L1_CACHE_SHIFT
 ENTRY(__tegra_cpu_reset_handler_end)

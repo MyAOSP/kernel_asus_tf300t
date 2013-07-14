@@ -163,6 +163,8 @@ static void input_stop_autorepeat(struct input_dev *dev)
 #define INPUT_PASS_TO_DEVICE	2
 #define INPUT_PASS_TO_ALL	(INPUT_PASS_TO_HANDLERS | INPUT_PASS_TO_DEVICE)
 
+int count_ignore = 0;
+
 static int input_handle_abs_event(struct input_dev *dev,
 				  unsigned int code, int *pval)
 {
@@ -199,8 +201,24 @@ static int input_handle_abs_event(struct input_dev *dev,
 		*pval = input_defuzz_abs_event(*pval, *pold,
 						dev->absinfo[code].fuzz);
 		if (*pold == *pval)
-			return INPUT_IGNORE_EVENT;
-
+		{
+			if (strcmp(dev->name,"KXT_9_accel")==0)
+			{
+				if (count_ignore < 30)
+				{
+					count_ignore ++;
+					return INPUT_IGNORE_EVENT;
+				}
+				else
+					count_ignore = 0;
+			}
+			else
+				return INPUT_IGNORE_EVENT;
+		}
+		else if (strcmp(dev->name,"KXT_9_accel")==0)
+		{
+			count_ignore = 0;
+		}
 		*pold = *pval;
 	}
 
@@ -451,7 +469,6 @@ int input_grab_device(struct input_handle *handle)
 	}
 
 	rcu_assign_pointer(dev->grab, handle);
-	synchronize_rcu();
 
  out:
 	mutex_unlock(&dev->mutex);

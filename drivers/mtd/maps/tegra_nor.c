@@ -1,9 +1,5 @@
 /*
- * drivers/mtd/maps/tegra_nor.c
- *
- * MTD mapping driver for the internal SNOR controller in Tegra SoCs
- *
- * Copyright (C) 2009 - 2011 NVIDIA Corporation
+ * Copyright (C) 2009-2012, NVIDIA Corporation.  All rights reserved.
  *
  * Author:
  *	Raghavendra VK <rvk@nvidia.com>
@@ -21,6 +17,11 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ *
+ * drivers/mtd/maps/tegra_nor.c
+ *
+ * MTD mapping driver for the internal SNOR controller in Tegra SoCs
+ *
  */
 
 #include <linux/platform_device.h>
@@ -118,6 +119,8 @@ struct tegra_nor_info {
 	struct map_info map;
 	struct completion dma_complete;
 	void __iomem *base;
+	void *dma_virt_buffer;
+	dma_addr_t dma_phys_buffer;
 	u32 init_config;
 	u32 timing0_default, timing1_default;
 	u32 timing0_read, timing1_read;
@@ -137,9 +140,7 @@ static inline void snor_tegra_writel(struct tegra_nor_info *tnor,
 
 #define DRV_NAME "tegra-nor"
 
-#ifdef CONFIG_MTD_PARTITIONS
-static const char * const part_probes[] = { "cmdlinepart", NULL };
-#endif
+static const char *part_probes[] = { "cmdlinepart", NULL };
 
 static int wait_for_dma_completion(struct tegra_nor_info *info)
 {
@@ -156,9 +157,11 @@ static void tegra_flash_dma(struct map_info *map,
 {
 	u32 snor_config, dma_config = 0;
 	int dma_transfer_count = 0, word32_count = 0;
-	u32 nor_address, ahb_address, current_transfer;
+	u32 nor_address, current_transfer = 0;
+	u32 copy_to = (u32)to;
 	struct tegra_nor_info *c =
 	    container_of(map, struct tegra_nor_info, map);
+	struct tegra_nor_chip_parms *chip_parm = &c->plat->chip_parms;
 	unsigned int bytes_remaining = len;
 
 	snor_config = c->init_config;
@@ -166,16 +169,6 @@ static void tegra_flash_dma(struct map_info *map,
 	snor_tegra_writel(c, c->timing1_read, TEGRA_SNOR_TIMING1_REG);
 
 	if (len > 32) {
-
-		if (to >= high_memory)
-			goto out_copy;
-
-		ahb_address = dma_map_single(c->dev, to, len, DMA_FROM_DEVICE);
-		if (dma_mapping_error(c->dev, ahb_address)) {
-			dev_err(c->dev,
-				"Couldn't DMA map a %d byte buffer\n", len);
-			goto out_copy;
-		}
 		word32_count = len >> 2;
 		bytes_remaining = len & 0x00000003;
 		/*
@@ -183,9 +176,52 @@ static void tegra_flash_dma(struct map_info *map,
 		 * controller register only after all parameters are set.
 		 */
 		/* SNOR CONFIGURATION SETUP */
-		snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(1);
-		/* 8 word page */
-		snor_config |= TEGRA_SNOR_CONFIG_PAGE_SZ(2);
+		switch(chip_parm->ReadMode)
+		{
+			case NorReadMode_Async:
+				snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(0);
+				break;
+
+			case NorReadMode_Page:
+				switch(chip_parm->PageLength)
+				{
+					case NorPageLength_Unsupported :
+						snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(0);
+						break;
+
+					case NorPageLength_4Word :
+						snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(1);
+						snor_config |= TEGRA_SNOR_CONFIG_PAGE_SZ(1);
+						break;
+
+					case NorPageLength_8Word :
+						snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(1);
+						snor_config |= TEGRA_SNOR_CONFIG_PAGE_SZ(2);
+						break;
+				}
+				break;
+
+			case NorReadMode_Burst:
+				snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(2);
+				switch(chip_parm->BurstLength)
+				{
+					case NorBurstLength_CntBurst :
+						snor_config |= TEGRA_SNOR_CONFIG_BURST_LEN(0);
+						break;
+					case NorBurstLength_8Word :
+						snor_config |= TEGRA_SNOR_CONFIG_BURST_LEN(1);
+						break;
+
+					case NorBurstLength_16Word :
+						snor_config |= TEGRA_SNOR_CONFIG_BURST_LEN(2);
+						break;
+
+					case NorBurstLength_32Word :
+						snor_config |= TEGRA_SNOR_CONFIG_BURST_LEN(3);
+						break;
+				}
+				break;
+		}
 		snor_config |= TEGRA_SNOR_CONFIG_MST_ENB;
 		/* SNOR DMA CONFIGURATION SETUP */
 		/* NOR -> AHB */
@@ -198,7 +234,7 @@ static void tegra_flash_dma(struct map_info *map,
 		     word32_count -= current_transfer,
 		     dma_transfer_count += current_transfer,
 		     nor_address += (current_transfer * 4),
-		     ahb_address += (current_transfer * 4)) {
+		     copy_to += (current_transfer * 4)) {
 
 			current_transfer =
 			    (word32_count > TEGRA_SNOR_DMA_LIMIT_WORDS)
@@ -212,7 +248,7 @@ static void tegra_flash_dma(struct map_info *map,
 			/* Num of AHB (32-bit) words to transferred minus 1 */
 			dma_config |=
 			    TEGRA_SNOR_DMA_CFG_WRD_CNT(current_transfer - 1);
-			snor_tegra_writel(c, ahb_address,
+			snor_tegra_writel(c, c->dma_phys_buffer,
 					  TEGRA_SNOR_AHB_ADDR_PTR_REG);
 			snor_tegra_writel(c, nor_address,
 					  TEGRA_SNOR_NOR_ADDR_PTR_REG);
@@ -226,15 +262,19 @@ static void tegra_flash_dma(struct map_info *map,
 				bytes_remaining += (word32_count << 2);
 				break;
 			}
+			dma_sync_single_for_cpu(c->dev, c->dma_phys_buffer,
+				(current_transfer << 2), DMA_FROM_DEVICE);
+			memcpy((char *)(copy_to), (char *)(c->dma_virt_buffer),
+				(current_transfer << 2));
+
 		}
-		dma_unmap_single(c->dev, ahb_address, len, DMA_FROM_DEVICE);
 	}
 	/* Put the controller back into slave mode. */
 	snor_config = snor_tegra_readl(c, TEGRA_SNOR_CONFIG_REG);
 	snor_config &= ~TEGRA_SNOR_CONFIG_MST_ENB;
 	snor_config |= TEGRA_SNOR_CONFIG_DEVICE_MODE(0);
 	snor_tegra_writel(c, snor_config, TEGRA_SNOR_CONFIG_REG);
-out_copy:
+
 	memcpy_fromio(((char *)to + (dma_transfer_count << 2)),
 		      ((char *)(map->virt + from) + (dma_transfer_count << 2)),
 		      bytes_remaining);
@@ -278,15 +318,35 @@ static int tegra_snor_controller_init(struct tegra_nor_info *info)
 	default:
 		return -EINVAL;
 	}
-	config |= TEGRA_SNOR_CONFIG_BURST_LEN(0);
-	config &= ~TEGRA_SNOR_CONFIG_MUX_MODE;
+	switch (chip_parm->MuxMode)
+	{
+		case NorMuxMode_ADNonMux:
+			config &= ~TEGRA_SNOR_CONFIG_MUX_MODE;
+			break;
+		case NorMuxMode_ADMux:
+			config |= TEGRA_SNOR_CONFIG_MUX_MODE;
+			break;
+		default:
+			return -EINVAL;
+	}
+	switch (chip_parm->ReadyActive)
+	{
+		case NorReadyActive_WithData:
+			config &= ~TEGRA_SNOR_CONFIG_RDY_ACTIVE;
+			break;
+		case NorReadyActive_BeforeData:
+			config |= TEGRA_SNOR_CONFIG_RDY_ACTIVE;
+			break;
+		default:
+			return -EINVAL;
+	}
 	snor_tegra_writel(info, config, TEGRA_SNOR_CONFIG_REG);
 	info->init_config = config;
 
 	info->timing0_default = chip_parm->timing_default.timing0;
 	info->timing0_read = chip_parm->timing_read.timing0;
 	info->timing1_default = chip_parm->timing_default.timing1;
-	info->timing1_read = chip_parm->timing_read.timing0;
+	info->timing1_read = chip_parm->timing_read.timing1;
 
 	snor_tegra_writel(info, info->timing1_default, TEGRA_SNOR_TIMING1_REG);
 	snor_tegra_writel(info, info->timing0_default, TEGRA_SNOR_TIMING0_REG);
@@ -315,7 +375,7 @@ static int tegra_nor_probe(struct platform_device *pdev)
 		goto fail;
 	}
 
-	/* Get NOR flash aperture & map the same */
+	/* Get NOR controller & map the same */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
 		dev_err(dev, "no mem resource?\n");
@@ -403,30 +463,40 @@ static int tegra_nor_probe(struct platform_device *pdev)
 		dev_err(dev, "Failed to request irq %i\n", irq);
 		goto out_clk_disable;
 	}
+	info->dma_virt_buffer = dma_alloc_coherent(dev,
+							TEGRA_SNOR_DMA_LIMIT,
+							&info->dma_phys_buffer,
+							GFP_KERNEL);
+	if (info->dma_virt_buffer == NULL) {
+		dev_err(&pdev->dev, "Could not allocate buffer for DMA");
+		err = -ENOMEM;
+		goto out_clk_disable;
+	}
 
 	info->mtd = do_map_probe(plat->flash.map_name, &info->map);
 	if (!info->mtd) {
 		err = -EIO;
-		goto out_clk_disable;
+		goto out_dma_free_coherent;
 	}
 	info->mtd->owner = THIS_MODULE;
 	info->parts = NULL;
 
 	platform_set_drvdata(pdev, info);
-#ifdef CONFIG_MTD_PARTITIONS
 	err = parse_mtd_partitions(info->mtd, part_probes, &info->parts, 0);
 	if (err > 0)
-		err = add_mtd_partitions(info->mtd, info->parts, err);
+		err = mtd_device_register(info->mtd, info->parts, err);
 	else if (err <= 0 && plat->flash.parts)
 		err =
-		    add_mtd_partitions(info->mtd, plat->flash.parts,
+		    mtd_device_register(info->mtd, plat->flash.parts,
 				       plat->flash.nr_parts);
 	else
-#endif
-		add_mtd_device(info->mtd);
+		mtd_device_register(info->mtd, NULL, 0);
 
 	return 0;
 
+out_dma_free_coherent:
+	dma_free_coherent(dev, TEGRA_SNOR_DMA_LIMIT,
+				info->dma_virt_buffer, info->dma_phys_buffer);
 out_clk_disable:
 	clk_disable(info->clk);
 out_clk_put:
@@ -440,11 +510,11 @@ static int tegra_nor_remove(struct platform_device *pdev)
 {
 	struct tegra_nor_info *info = platform_get_drvdata(pdev);
 
-	if (info->parts) {
-		del_mtd_partitions(info->mtd);
+	mtd_device_unregister(info->mtd);
+	if (info->parts)
 		kfree(info->parts);
-	} else
-		del_mtd_device(info->mtd);
+	dma_free_coherent(&pdev->dev, TEGRA_SNOR_DMA_LIMIT,
+				info->dma_virt_buffer, info->dma_phys_buffer);
 	map_destroy(info->mtd);
 	clk_disable(info->clk);
 	clk_put(info->clk);

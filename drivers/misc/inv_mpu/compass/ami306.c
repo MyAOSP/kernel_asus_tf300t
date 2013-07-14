@@ -38,6 +38,7 @@
 #include <asm/uaccess.h>
 #include <linux/fs.h>
 #include <linux/workqueue.h>
+#include <linux/sysfs.h>
 #include "mpu-dev.h"
 
 #include "ami_hw.h"
@@ -47,6 +48,7 @@
 #include <linux/mpu.h>
 #include "mlsl.h"
 #include "mldl_cfg.h"
+#include <mach/board-cardhu-misc.h>
 #undef MPL_LOG_TAG
 #define MPL_LOG_TAG "MPL-compass"
 
@@ -77,9 +79,17 @@ static int ami306_mod_delay_init(void);
 #define AMI_GAIN_COR_DEFAULT		(1000)
 
 #define AMI30X_CALIBRATION_PATH "/data/sensors/AMI304_Config.ini"
-static int gain_x = 100, gain_y = 100, gain_z = 100;
+#define AMI306_CALIBRATION_PATH "/data/sensors/AMI306_Config.ini"
 bool flagLoadConfig = false;
 EXPORT_SYMBOL(flagLoadConfig);
+
+struct cali_check_data {
+	short ori[3];
+	short post[3];
+	int gain[3];
+	int file_exist;
+};
+struct cali_check_data cali_chk;
 
 struct ami306_private_data {
 	int isstandby;
@@ -88,16 +98,22 @@ struct ami306_private_data {
 	struct ami_win_parameter win;
 };
 
+struct ami306_mod_private_data {
+	struct i2c_client *client;
+	struct ext_slave_platform_data *pdata;
+	struct attribute_group attrs;
+};
+
 /* -------------------------------------------------------------------------- */
 static inline unsigned short little_u8_to_u16(unsigned char *p_u8)
 {
 	return p_u8[0] | (p_u8[1] << 8);
 }
 
-static int access_calibration_file(void)
+static int access_calibration_file(int *gain)
 {
 	char buf[256];
-       int ret = 0;
+	int ret = 0, ii = 0;
 	struct file *fp = NULL;
 	mm_segment_t oldfs;
 	int data[23];
@@ -107,11 +123,17 @@ static int access_calibration_file(void)
 	memset(buf, 0, sizeof(u8)*256);
 
 	fp=filp_open(AMI30X_CALIBRATION_PATH, O_RDONLY, 0);
+	if (IS_ERR(fp))
+	{
+		printk("read ami306.ini\n");
+		fp=filp_open(AMI306_CALIBRATION_PATH, O_RDONLY, 0);
+	}
+
 	if (!IS_ERR(fp)) {
 		printk("ami306 open config file success\n");
 		ret = fp->f_op->read(fp, buf, sizeof(buf), &fp->f_pos);
-		printk("ami306 config content is :%s\n", buf);
-		sscanf(buf,"%6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d",
+		printk("ami306 config content is :\n%s\n", buf);
+		sscanf(buf, "%6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d %6d %6d\n%6d\n",
 			&data[0],
 			&data[1], &data[2], &data[3],
 			&data[4], &data[5], &data[6],
@@ -126,16 +148,16 @@ static int access_calibration_file(void)
 		if((data[19] > 150) || (data[19] < 50) ||
 		   (data[20] > 150) || (data[20] < 50) ||
 		   (data[21] > 150) || (data[21] < 50)){
-			gain_x = 100;
-			gain_y = 100;
-			gain_z = 100;
-		}else{
-			gain_x = data[19];
-			gain_y = data[20];
-			gain_z = data[21];
-		}
-		printk("gain: %d %d %d\n", gain_x, gain_y, gain_z);
+			for (ii = 0; ii < 3; ii++)
+				gain[ii] = 100;
 
+		}else{
+			for (ii = 0; ii < 3; ii++)
+				gain[ii] = data[ii+19];
+		}
+
+		printk("gain: %d %d %d\n", gain[0], gain[1], gain[2]);
+		return 0;
 	}
 	else
 	{
@@ -144,7 +166,104 @@ static int access_calibration_file(void)
 		return -1;
 	}
 
+	return -1;
 }
+
+static ssize_t compass_cali_test(struct device *dev, struct device_attribute *devattr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ami306_mod_private_data *data = i2c_get_clientdata(client);
+	int bufcnt = 0;
+	char localbuf[100];
+	int ii;
+	short val[COMPASS_NUM_AXES];
+
+	//check the factory calibration file is exist or not
+	if (cali_chk.file_exist == 0)
+		bufcnt = sprintf(localbuf,"\nE-compass calibration file EXIST.\n\n");
+	else
+		bufcnt = sprintf(localbuf,"\nThere is NO e-compass calibration file !\n\n");
+
+	strncat(buf,localbuf,strlen(localbuf));
+
+	//check the calculation form raw data and gain is correct or not
+	for (ii =0; ii <COMPASS_NUM_AXES; ii++)
+	{
+		if (cali_chk.gain[ii] <= 0)
+			cali_chk.gain[ii] = 100;
+
+		val[ii] = (short)(cali_chk.ori[ii]*100/cali_chk.gain[ii]);
+		if (val[ii] != cali_chk.post[ii])
+			bufcnt += sprintf(localbuf,"axis-%d data compensation (%d) is NOT matched to the gain %d !\n",ii,val[ii],cali_chk.post[ii]);
+		else
+			bufcnt += sprintf(localbuf,"axis-%d data compensation is matched to the gain. \n",ii);
+		strncat(buf,localbuf,strlen(localbuf));
+	}
+
+	printk(KERN_INFO, "ori:(%d, %d, %d); post:(%d, %d, %d)\n",
+		cali_chk.ori[0], cali_chk.ori[1], cali_chk.ori[2],
+		cali_chk.post[0], cali_chk.post[1], cali_chk.post[2]);
+	bufcnt += sprintf(localbuf, "\ngain: (%d, %d, %d)\nori:(%d, %d, %d); post:(%d, %d, %d)\n",
+		cali_chk.gain[0], cali_chk.gain[1], cali_chk.gain[2],
+		cali_chk.ori[0], cali_chk.ori[1], cali_chk.ori[2],
+		cali_chk.post[0], cali_chk.post[1], cali_chk.post[2]);
+
+	strncat(buf,localbuf,strlen(localbuf));
+	return bufcnt;
+}
+
+static ssize_t set_GM_direction(struct device *dev, struct device_attribute *devattr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ami306_mod_private_data *data = i2c_get_clientdata(client);
+	unsigned char Mdir, Gdir;
+
+	u32 project_info = tegra3_get_project_id();
+
+	switch (project_info)
+	{
+		case TEGRA3_PROJECT_TF201:
+			printk("Project is TF201\n");
+			Mdir = 10;
+			Gdir = 10;
+			break;
+		case TEGRA3_PROJECT_TF300T:
+			printk("Project is TF300T\n");
+			Mdir = 2;
+			Gdir = 26;
+			break;
+		case TEGRA3_PROJECT_TF300TG:
+			printk("Project is TF300TG\n");
+			Mdir = 18;
+			Gdir = 26;
+			break;
+		case TEGRA3_PROJECT_TF700T:
+			printk("Project is TF700T\n");
+			Mdir = 18;
+			Gdir = 26;
+			break;
+		case TEGRA3_PROJECT_TF300TL:
+			printk("Project is TF300TL\n");
+			Mdir = 6;
+			Gdir = 26;
+			break;
+		default:
+			printk("No Project Info!\n");
+			Mdir = 26;
+			Gdir = 26;
+	};
+	return sprintf(buf,"%d %d\n", Mdir, Gdir);
+}
+
+DEVICE_ATTR(compass_cali_test, S_IRUGO, compass_cali_test, NULL);
+DEVICE_ATTR(set_GM_dir, S_IRUGO, set_GM_direction, NULL);
+
+static struct attribute *ami_306_attr[] = {
+	&dev_attr_compass_cali_test.attr,
+	&dev_attr_set_GM_dir.attr,
+	NULL
+};
+
 static int ami306_set_bits8(void *mlsl_handle,
 			    struct ext_slave_platform_data *pdata,
 			    unsigned char reg, unsigned char bits)
@@ -716,36 +835,32 @@ static int ami306_read(void *mlsl_handle,
 			   1, &stat);
 	if (result) {
 		LOG_RESULT_LOCATION(result);
+		return result;
 	}
 
-	if (stat & 0x40) {
-		if(!flagLoadConfig)
-		{
-			access_calibration_file();
-			flagLoadConfig = true;
-		}
-		result = inv_serial_read(mlsl_handle, pdata->address, AMI306_REG_DATAX, 6, (unsigned char *) data);
-		if (result) {
-			LOG_RESULT_LOCATION(result);
-		}
-		/* start another measurement */
-		result = inv_serial_single_write(mlsl_handle, pdata->address, AMI306_REG_CNTL3, AMI306_BIT_CNTL3_F0RCE);
-		if (result) {
-			LOG_RESULT_LOCATION(result);
-		}
-
-		val[0] =  ((short)(data[1] << 8 | data[0]))*gain_x/100;
-		val[1] =  ((short)(data[3] << 8 | data[2]))*gain_y/100;
-		val[2] =  ((short)(data[5] << 8 | data[4]))*gain_z/100;
-
-	}
 	result = ami306_mea(mlsl_handle, pdata, val);
 	if (result) {
 		LOG_RESULT_LOCATION(result);
 		return result;
 	}
+
+	if(!flagLoadConfig)
+	{
+		cali_chk.file_exist = access_calibration_file(cali_chk.gain);
+		flagLoadConfig = true;
+	}
+
 	for (ii = 0; ii < COMPASS_NUM_AXES; ii++) {
 		val[ii] -= AMI_STANDARD_OFFSET;
+
+		cali_chk.ori[ii] = val[ii];
+
+		if (cali_chk.gain[ii] <= 0)
+			cali_chk.gain[ii] = 100;
+
+		val[ii] = (short)(val[ii]*100/cali_chk.gain[ii]);
+		cali_chk.post[ii] = val[ii];
+
 		data[2 * ii] = val[ii] & 0xFF;
 		data[(2 * ii) + 1] = (val[ii] >> 8) & 0xFF;
 	}
@@ -996,10 +1111,10 @@ struct ext_slave_descr *ami306_get_slave_descr(void)
 }
 
 /* -------------------------------------------------------------------------- */
-struct ami306_mod_private_data {
+/*struct ami306_mod_private_data {
 	struct i2c_client *client;
 	struct ext_slave_platform_data *pdata;
-};
+};*/
 
 static unsigned short normal_i2c[] = { I2C_CLIENT_END };
 
@@ -1009,6 +1124,7 @@ static int ami306_mod_probe(struct i2c_client *client,
 	struct ext_slave_platform_data *pdata;
 	struct ami306_mod_private_data *private_data;
 	int result = 0;
+	int ii = 0;
 
 	dev_info(&client->adapter->dev, "%s: %s\n", __func__, devid->name);
 
@@ -1041,6 +1157,20 @@ static int ami306_mod_probe(struct i2c_client *client,
 		dev_err(&client->adapter->dev,
 			"Slave registration failed: %s, %d\n",
 			devid->name, result);
+		goto out_free_memory;
+	}
+
+	/* init for loading factory file */
+	for (ii = 0; ii < 3; ii++)
+		cali_chk.gain[ii] = 100;
+
+	// create ami306 sysfs
+	private_data->attrs.attrs = ami_306_attr;
+
+	result = sysfs_create_group(&client->dev.kobj, &private_data->attrs);
+	if (result) {
+		dev_err(&client->dev, "Not able to create the sysfs\n");
+		printk("%s:Not able to create the sysfs\n", __FUNCTION__);
 		goto out_free_memory;
 	}
 

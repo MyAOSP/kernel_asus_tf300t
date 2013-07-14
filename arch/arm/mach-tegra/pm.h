@@ -2,7 +2,7 @@
  * arch/arm/mach-tegra/include/mach/pm.h
  *
  * Copyright (C) 2010 Google, Inc.
- * Copyright (C) 2010-2011 NVIDIA Corporation
+ * Copyright (c) 2010-2012, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author:
  *	Colin Cross <ccross@google.com>
@@ -29,6 +29,20 @@
 
 #include <mach/iomap.h>
 
+#define PMC_SCRATCH0		0x50
+#define PMC_SCRATCH1		0x54
+#define PMC_SCRATCH4		0x60
+
+/* The following two constants are for setting the CPU freq
+ * floor when display is on. 204000Khz is for tablet and
+ * 102000KHz is for phones. The reason for different values
+ * for tablet and phone is due to phones usually have smart
+ * displays that requires less CPU activity for refreshing
+ * the screen
+ */
+
+#define CPU_WAKE_FREQ_HIGH	204000
+#define CPU_WAKE_FREQ_LOW	102000
 enum tegra_suspend_mode {
 	TEGRA_SUSPEND_NONE = 0,
 	TEGRA_SUSPEND_LP2,	/* CPU voltage off */
@@ -60,13 +74,27 @@ struct tegra_suspend_platform_data {
 	void (*board_suspend)(int lp_state, enum suspend_stage stg);
 	/* lp_state = 0 for LP0 state, 1 for LP1 state, 2 for LP2 state */
 	void (*board_resume)(int lp_state, enum resume_stage stg);
+	unsigned int cpu_resume_boost;	/* CPU frequency resume boost in kHz */
+#ifdef CONFIG_TEGRA_LP1_950
+	bool lp1_lowvolt_support;
+	unsigned int i2c_base_addr;
+	unsigned int pmuslave_addr;
+	unsigned int core_reg_addr;
+	unsigned int lp1_core_volt_low;
+	unsigned int lp1_core_volt_high;
+#endif
+	int cpu_wake_freq;
 };
+
+/* clears io dpd settings before kernel code */
+void tegra_bl_io_dpd_cleanup(void);
 
 unsigned long tegra_cpu_power_good_time(void);
 unsigned long tegra_cpu_power_off_time(void);
 unsigned long tegra_cpu_lp2_min_residency(void);
 void tegra_clear_cpu_in_lp2(int cpu);
 bool tegra_set_cpu_in_lp2(int cpu);
+bool tegra_is_cpu_in_lp2(int cpu);
 
 int tegra_suspend_dram(enum tegra_suspend_mode mode, unsigned int flags);
 
@@ -83,15 +111,6 @@ int tegra_suspend_dram(enum tegra_suspend_mode mode, unsigned int flags);
 void __init tegra_init_suspend(struct tegra_suspend_platform_data *plat);
 
 u64 tegra_rtc_read_ms(void);
-
-#ifdef CONFIG_PM_EXPIRE_SUSPEND
-/* kernel/power/suspend_expire.c */
-extern void dram_expire_start(void);
-extern void dram_expire_finish(void);
-#else
-static inline void dram_expire_start(void) {}
-static inline void dram_expire_finish(void) {}
-#endif
 
 /*
  * Callbacks for platform drivers to implement.
@@ -154,6 +173,8 @@ unsigned long tegra2_lp2_timer_remain(void);
 #ifdef CONFIG_ARCH_TEGRA_3x_SOC
 void tegra3_lp2_set_trigger(unsigned long cycles);
 unsigned long tegra3_lp2_timer_remain(void);
+int tegra3_is_lp2_timer_ready(unsigned int cpu);
+void tegra3_lp2_timer_cancel_secondary(void);
 #endif
 
 static inline void tegra_lp0_suspend_init(void)
@@ -183,6 +204,22 @@ static inline unsigned long tegra_lp2_timer_remain(void)
 #endif
 }
 
+static inline int tegra_is_lp2_timer_ready(unsigned int cpu)
+{
+#if defined(CONFIG_TEGRA_LP2_ARM_TWD) || defined(CONFIG_ARCH_TEGRA_2x_SOC)
+	return 1;
+#else
+	return tegra3_is_lp2_timer_ready(cpu);
+#endif
+}
+
+static inline void tegra_lp2_timer_cancel_secondary(void)
+{
+#ifndef CONFIG_ARCH_TEGRA_2x_SOC
+	tegra3_lp2_timer_cancel_secondary();
+#endif
+}
+
 #if DEBUG_CLUSTER_SWITCH && 0 /* !!!FIXME!!! THIS IS BROKEN */
 extern unsigned int tegra_cluster_debug;
 #define DEBUG_CLUSTER(x) do { if (tegra_cluster_debug) printk x; } while (0)
@@ -205,6 +242,8 @@ extern bool tegra_all_cpus_booted __read_mostly;
 
 #ifdef CONFIG_TRUSTED_FOUNDATIONS
 void tegra_generic_smc(u32 type, u32 subtype, u32 arg);
+void tegra_generic_smc_local(u32 type, u32 subtype, u32 arg);
+void tegra_generic_smc_uncached(u32 type, u32 subtype, u32 arg);
 #endif
 
 /* The debug channel uart base physical address */

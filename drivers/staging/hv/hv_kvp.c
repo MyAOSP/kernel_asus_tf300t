@@ -20,23 +20,14 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  *
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/net.h>
 #include <linux/nls.h>
 #include <linux/connector.h>
 #include <linux/workqueue.h>
 
-#include "logging.h"
-#include "hv_api.h"
-#include "vmbus.h"
-#include "vmbus_packet_format.h"
-#include "vmbus_channel_interface.h"
-#include "version_info.h"
-#include "channel.h"
-#include "vmbus_private.h"
-#include "vmbus_api.h"
-#include "utils.h"
+#include "hyperv.h"
 #include "hv_kvp.h"
 
 
@@ -114,7 +105,7 @@ kvp_cn_callback(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 
 	message = (struct hv_ku_msg *)msg->data;
 	if (msg->seq == KVP_REGISTER) {
-		printk(KERN_INFO "KVP: user-mode registering done.\n");
+		pr_info("KVP: user-mode registering done.\n");
 		kvp_register();
 	}
 
@@ -174,7 +165,7 @@ kvp_respond_to_host(char *key, char *value, int error)
 		/*
 		 * This is a spurious call!
 		 */
-		printk(KERN_WARNING "KVP: Transaction not active\n");
+		pr_warn("KVP: Transaction not active\n");
 		return;
 	}
 	/*
@@ -210,11 +201,13 @@ kvp_respond_to_host(char *key, char *value, int error)
 	 * The windows host expects the key/value pair to be encoded
 	 * in utf16.
 	 */
-	keylen = utf8s_to_utf16s(key_name, strlen(key_name),
-				(wchar_t *)kvp_data->data.key);
+	keylen = utf8s_to_utf16s(key_name, strlen(key_name), UTF16_HOST_ENDIAN,
+				(wchar_t *) kvp_data->data.key,
+				HV_KVP_EXCHANGE_MAX_KEY_SIZE / 2);
 	kvp_data->data.key_size = 2*(keylen + 1); /* utf16 encoding */
-	valuelen = utf8s_to_utf16s(value, strlen(value),
-				(wchar_t *)kvp_data->data.value);
+	valuelen = utf8s_to_utf16s(value, strlen(value), UTF16_HOST_ENDIAN,
+				(wchar_t *) kvp_data->data.value,
+				HV_KVP_EXCHANGE_MAX_VALUE_SIZE / 2);
 	kvp_data->data.value_size = 2*(valuelen + 1); /* utf16 encoding */
 
 	kvp_data->data.value_type = REG_SZ; /* all our values are strings */
@@ -259,9 +252,6 @@ void hv_kvp_onchannelcallback(void *context)
 	vmbus_recvpacket(channel, recv_buffer, PAGE_SIZE, &recvlen, &requestid);
 
 	if (recvlen > 0) {
-		DPRINT_DBG(VMBUS, "KVP packet: len=%d, requestid=%lld",
-			   recvlen, requestid);
-
 		icmsghdrp = (struct icmsg_hdr *)&recv_buffer[
 			sizeof(struct vmbuspipe_hdr)];
 

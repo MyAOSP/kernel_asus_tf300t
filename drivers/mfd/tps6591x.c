@@ -32,6 +32,7 @@
 
 #include <linux/mfd/core.h>
 #include <linux/mfd/tps6591x.h>
+#include <mach/board-cardhu-misc.h>
 //=================stree test=================
 #include <linux/miscdevice.h>
 #include <linux/ioctl.h>
@@ -40,12 +41,18 @@
 #include <linux/delay.h>
 #define TPS6591X_RETRY_LIMIT (3)
 #define TPS6591X_RETRY_DELAY (5)
+
 /* device control registers */
 #define TPS6591X_DEVCTRL	0x3F
 #define DEVCTRL_PWR_OFF_SEQ	(1 << 7)
 #define DEVCTRL_DEV_ON		(1 << 2)
 #define DEVCTRL_DEV_SLP		(1 << 1)
+#define DEVCTRL_DEV_OFF		(1 << 0)
 #define TPS6591X_DEVCTRL2	0x40
+
+#define TPS6591X_VDDCTRL_ADD	0x27
+#define TPS6591X_VDDCTRL_STATE_OFF	0x0
+#define TPS6591X_VDDCTRL_STATE_MASK	0x3
 
 /* device sleep on registers */
 #define TPS6591X_SLEEP_KEEP_ON	0x42
@@ -73,6 +80,9 @@
 #define TPS6591X_GPIO_SLEEP	7
 #define TPS6591X_GPIO_PDEN	3
 #define TPS6591X_GPIO_DIR	2
+
+#define GPIO4_F_IT_MSK (1 << 1)
+#define RTC_ALARM_IT_MSK (1 << 6)
 
 enum irq_type {
 	EVENT,
@@ -122,6 +132,7 @@ struct tps6591x {
 	struct irq_chip		irq_chip;
 	struct mutex		irq_lock;
 	int			irq_base;
+	int			irq_main;
 	u32			irq_en;
 	u8			mask_cache[3];
 	u8			mask_reg[3];
@@ -146,7 +157,7 @@ static inline int __tps6591x_read(struct i2c_client *client,
 			udelay(TPS6591X_RETRY_DELAY);
 			retry_time ++;
 			pr_info("%s : retry %d times\n", __func__, retry_time);
-			ret = i2c_smbus_read_byte_data(client, reg);
+	ret = i2c_smbus_read_byte_data(client, reg);
 		}
 		else
 		{
@@ -198,6 +209,7 @@ static inline int __tps6591x_write(struct i2c_client *client,
 				 int reg, uint8_t val)
 {
 	int ret, retry_time = 0;
+
 	ret = i2c_smbus_write_byte_data(client, reg, val);
 
 	while(ret < 0)
@@ -207,7 +219,7 @@ static inline int __tps6591x_write(struct i2c_client *client,
 			udelay(TPS6591X_RETRY_DELAY);
 			retry_time ++;
 			pr_info("%s : retry %d times\n", __func__, retry_time);
-			ret = i2c_smbus_write_byte_data(client, reg, val);
+	ret = i2c_smbus_write_byte_data(client, reg, val);
 		}
 		else
 		{
@@ -359,25 +371,32 @@ out:
 EXPORT_SYMBOL_GPL(tps6591x_update);
 
 static struct i2c_client *tps6591x_i2c_client;
-int tps6591x_power_off(void)
+static void tps6591x_power_off(void)
 {
 	struct device *dev = NULL;
 	int ret;
+	pr_err("%s ++\n", __func__);
 
 	if (!tps6591x_i2c_client)
-		return -EINVAL;
+		return;
 
 	dev = &tps6591x_i2c_client->dev;
 
+	pr_err("%s(): Setting power off seq\n", __func__);
 	ret = tps6591x_set_bits(dev, TPS6591X_DEVCTRL, DEVCTRL_PWR_OFF_SEQ);
 	if (ret < 0)
 		return ret;
 
-	ret = tps6591x_clr_bits(dev, TPS6591X_DEVCTRL, DEVCTRL_DEV_ON);
+	pr_err("%s(): Clearing DEV_SLP\n", __func__);
+	ret = tps6591x_clr_bits(dev, TPS6591X_DEVCTRL, DEVCTRL_DEV_SLP);
 	if (ret < 0)
 		return ret;
 
-	return 0;
+	pr_err("%s(): Setting device off and clearing dev-on\n", __func__);
+	ret = tps6591x_update(dev, TPS6591X_DEVCTRL, DEVCTRL_DEV_OFF,
+			DEVCTRL_DEV_OFF | DEVCTRL_DEV_ON);
+
+	return ret;
 }
 
 static int tps6591x_gpio_get(struct gpio_chip *gc, unsigned offset)
@@ -435,6 +454,7 @@ static int tps6591x_gpio_output(struct gpio_chip *gc, unsigned offset,
 	if (ret)
 		return ret;
 
+	reg_val &= ~0x1;
 	val = (value & 0x1) | 0x4;
 	reg_val = reg_val | val;
 	return __tps6591x_write(tps6591x->client, TPS6591X_GPIO_BASE_ADDR +
@@ -590,6 +610,17 @@ static int tps6591x_irq_set_type(struct irq_data *irq_data, unsigned int type)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int tps6591x_irq_set_wake(struct irq_data *irq_data, unsigned int on)
+{
+	struct tps6591x *tps6591x = irq_data_get_irq_chip_data(irq_data);
+	return irq_set_irq_wake(tps6591x->irq_main, on);
+}
+#else
+#define tps6591x_irq_set_wake NULL
+#endif
+
+
 static irqreturn_t tps6591x_irq(int irq, void *data)
 {
 	struct tps6591x *tps6591x = data;
@@ -640,6 +671,7 @@ static int __devinit tps6591x_irq_init(struct tps6591x *tps6591x, int irq,
 				int irq_base)
 {
 	int i, ret;
+	unsigned int project_id = tegra3_get_project_id();
 
 	if (!irq_base) {
 		dev_warn(tps6591x->dev, "No interrupt support on IRQ base\n");
@@ -650,7 +682,16 @@ static int __devinit tps6591x_irq_init(struct tps6591x *tps6591x, int irq,
 
 	tps6591x->mask_reg[0] = 0xFF;
 	tps6591x->mask_reg[1] = 0xFF;
-	tps6591x->mask_reg[2] = 0xFF;
+
+	if(TEGRA3_PROJECT_ME301T == project_id || TEGRA3_PROJECT_ME301TL == project_id || TEGRA3_PROJECT_ME570T == project_id)
+	{
+		tps6591x->mask_reg[2] = 0xFE;
+	}
+	else
+	{
+		tps6591x->mask_reg[2] = 0xFF;
+	}
+
 	for (i = 0; i < 3; i++) {
 		tps6591x->mask_cache[i] = tps6591x->mask_reg[i];
 		tps6591x_write(tps6591x->dev, TPS6591X_INT_MSK + 2*i,
@@ -661,6 +702,7 @@ static int __devinit tps6591x_irq_init(struct tps6591x *tps6591x, int irq,
 		tps6591x_write(tps6591x->dev, TPS6591X_INT_STS + 2*i, 0xff);
 
 	tps6591x->irq_base = irq_base;
+	tps6591x->irq_main = irq;
 
 	tps6591x->irq_chip.name = "tps6591x";
 	tps6591x->irq_chip.irq_mask = tps6591x_irq_mask;
@@ -668,6 +710,7 @@ static int __devinit tps6591x_irq_init(struct tps6591x *tps6591x, int irq,
 	tps6591x->irq_chip.irq_bus_lock = tps6591x_irq_lock;
 	tps6591x->irq_chip.irq_bus_sync_unlock = tps6591x_irq_sync_unlock;
 	tps6591x->irq_chip.irq_set_type = tps6591x_irq_set_type;
+	tps6591x->irq_chip.irq_set_wake = tps6591x_irq_set_wake;
 
 	for (i = 0; i < ARRAY_SIZE(tps6591x_irqs); i++) {
 		int __irq = i + tps6591x->irq_base;
@@ -914,22 +957,20 @@ void tps6591x_read_stress_test(struct work_struct *work)
 }
 long  tps6591x_ioctl(struct file *filp,  unsigned int cmd, unsigned long arg)
 {
-	if (_IOC_TYPE(cmd) ==TPS6591X_IOC_MAGIC){
+	if (_IOC_TYPE(cmd) ==TPS6591X_IOC_MAGIC)
 	     printk("  tps6591x_ioctl vaild magic \n");
-		}
 	else	{
 		printk("  tps65991x_ioctl invaild magic \n");
 		return -ENOTTY;
-		}
+	}
 
 	switch(cmd)
 	{
 		 case TPS6591X_POLLING_DATA :
-		    if ((arg==START_NORMAL)||(arg==START_HEAVY)){
+		 if ((arg==START_NORMAL)||(arg==START_HEAVY)){
 				 printk(" tps6591x stress test start (%s)\n",(arg==START_NORMAL)?"normal":"heavy");
 				 queue_delayed_work(tps6591x_strees_work_queue, &temp_tps6591x->stress_test, 2*HZ);
-		    	}
-		else{
+		} else {
 				 printk(" t tps6591x tress test end\n");
 				 cancel_delayed_work_sync(&temp_tps6591x->stress_test);
 	      }
@@ -942,7 +983,7 @@ long  tps6591x_ioctl(struct file *filp,  unsigned int cmd, unsigned long arg)
 }
 int tps6591x_open(struct inode *inode, struct file *filp)
 {
-	return 0;          
+	return 0;
 }
 struct file_operations tps6591x_fops = {
 	.owner =    THIS_MODULE,
@@ -1005,6 +1046,9 @@ static int __devinit tps6591x_i2c_probe(struct i2c_client *client,
 
 	tps6591x_sleepinit(tps6591x, pdata);
 
+	if (pdata->use_power_off && !pm_power_off)
+		pm_power_off = tps6591x_power_off;
+
 	tps6591x_i2c_client = client;
 	//=================stree test=================
 	temp_tps6591x=tps6591x;
@@ -1028,6 +1072,24 @@ err_add_devs:
 		free_irq(client->irq, tps6591x);
 err_irq_init:
 	kfree(tps6591x);
+	return ret;
+}
+
+int tps6591x_set_reg_enable_record(void)
+{
+	int ret = 0;
+
+	tps6591x_write(temp_tps6591x->dev, 0x3e, 0x11);
+	printk("%s : set 0x3e to 0x11 ret = %d\n", __func__, ret);
+	return ret;
+}
+
+int tps6591x_set_reg_disable_record(void)
+{
+	int ret = 0;
+
+	tps6591x_write(temp_tps6591x->dev, 0x3e, 0x39);
+	printk("%s : set 0x3e to 0x39 ret = %d\n", __func__, ret);
 	return ret;
 }
 
@@ -1060,6 +1122,19 @@ static int tps6591x_i2c_resume(struct i2c_client *client)
 }
 #endif
 
+static int tps6591x_i2c_shutdown(struct i2c_client *client)
+{
+	int ret;
+
+	ret = tps6591x_set_bits(&client->dev, TPS6591X_INT_MSK3, GPIO4_F_IT_MSK);
+	if (ret < 0)
+		pr_err("%s(): Setting GPIO4_F_IT_MSK fail.\n", __func__);
+	ret = tps6591x_set_bits(&client->dev, TPS6591X_INT_MSK, RTC_ALARM_IT_MSK);
+	if (ret < 0)
+		pr_err("%s(): Setting RTC_ALARM_IT_MSK fail.\n", __func__);
+	return ret;
+}
+
 
 static const struct i2c_device_id tps6591x_id_table[] = {
 	{ "tps6591x", 0 },
@@ -1078,6 +1153,7 @@ static struct i2c_driver tps6591x_driver = {
 	.suspend	= tps6591x_i2c_suspend,
 	.resume		= tps6591x_i2c_resume,
 #endif
+	.shutdown = tps6591x_i2c_shutdown,
 	.id_table	= tps6591x_id_table,
 };
 

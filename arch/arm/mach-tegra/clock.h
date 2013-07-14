@@ -6,7 +6,7 @@
  * Author:
  *	Colin Cross <ccross@google.com>
  *
- * Copyright (C) 2010-2011, NVIDIA Corporation.
+ * Copyright (C) 2010-2012, NVIDIA Corporation.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -48,11 +48,12 @@
 #define PLLX			(1 << 15)
 #define MUX_PWM			(1 << 16)
 #define MUX8			(1 << 17)
-#define DIV_U71_UART		(1 << 18)
+#define DIV_U151_UART		(1 << 18)
 #define MUX_CLK_OUT		(1 << 19)
 #define PLLM			(1 << 20)
 #define DIV_U71_INT		(1 << 21)
 #define DIV_U71_IDLE		(1 << 22)
+#define DIV_U151		(1 << 23)
 #define ENABLE_ON_INIT		(1 << 28)
 #define PERIPH_ON_APB		(1 << 29)
 #define PERIPH_ON_CBUS		(1 << 30)
@@ -63,6 +64,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <trace/events/power.h>
 #include <asm/cputime.h>
 
 #include <mach/clk.h>
@@ -73,6 +75,12 @@ struct clk;
 struct clk_mux_sel {
 	struct clk	*input;
 	u32		value;
+};
+
+struct clk_backup {
+	struct clk	*input;
+	u32		value;
+	unsigned long	bus_rate;
 };
 
 struct clk_pll_freq_table {
@@ -151,7 +159,7 @@ struct clk {
 	u32				reg_shift;
 
 	struct list_head		shared_bus_list;
-	struct clk_mux_sel		shared_bus_backup;
+	struct clk_backup		shared_bus_backup;
 
 	union {
 		struct {
@@ -169,14 +177,21 @@ struct clk {
 			unsigned long			fixed_rate;
 		} pll;
 		struct {
+			unsigned long			default_rate;
+		} pll_div;
+		struct {
 			u32				sel;
 			u32				reg_mask;
 		} mux;
 		struct {
 			struct clk			*main;
 			struct clk			*backup;
+			unsigned long			backup_rate;
 			enum cpu_mode			mode;
 		} cpu;
+		struct {
+			u32				div71;
+		} cclk;
 		struct {
 			struct clk			*pclk;
 			struct clk			*hclk;
@@ -223,7 +238,7 @@ void tegra_soc_init_clocks(void);
 void tegra_init_max_rate(struct clk *c, unsigned long max_rate);
 void clk_init(struct clk *clk);
 struct clk *tegra_get_clock_by_name(const char *name);
-unsigned long clk_measure_input_freq(void);
+unsigned long tegra_clk_measure_input_freq(void);
 int clk_reparent(struct clk *c, struct clk *parent);
 void tegra_clk_init_from_table(struct tegra_clk_init_table *table);
 void clk_set_cansleep(struct clk *c);
@@ -235,10 +250,20 @@ int clk_set_parent_locked(struct clk *c, struct clk *parent);
 long clk_round_rate_locked(struct clk *c, unsigned long rate);
 int tegra_clk_shared_bus_update(struct clk *c);
 void tegra2_sdmmc_tap_delay(struct clk *c, int delay);
+void tegra3_set_cpu_skipper_delay(int delay);
 int tegra_emc_set_rate(unsigned long rate);
 long tegra_emc_round_rate(unsigned long rate);
 struct clk *tegra_emc_predict_parent(unsigned long rate, u32 *div_value);
 void tegra_emc_timing_invalidate(void);
+#ifdef CONFIG_ARCH_TEGRA_2x_SOC
+static inline int tegra_emc_backup(unsigned long rate)
+{ return 0; }
+static inline bool tegra_clk_is_parent_allowed(struct clk *c, struct clk *p)
+{ return true; }
+#else
+int tegra_emc_backup(unsigned long rate);
+bool tegra_clk_is_parent_allowed(struct clk *c, struct clk *p);
+#endif
 
 static inline bool clk_is_auto_dvfs(struct clk *c)
 {
@@ -257,6 +282,7 @@ static inline bool clk_cansleep(struct clk *c)
 
 static inline void clk_lock_save(struct clk *c, unsigned long *flags)
 {
+	trace_clock_lock(c->name, c->rate, smp_processor_id());
 	if (clk_cansleep(c)) {
 		*flags = 0;
 		mutex_lock(&c->mutex);
@@ -271,6 +297,7 @@ static inline void clk_unlock_restore(struct clk *c, unsigned long *flags)
 		mutex_unlock(&c->mutex);
 	else
 		spin_unlock_irqrestore(&c->spinlock, *flags);
+	trace_clock_unlock(c->name, c->rate, smp_processor_id());
 }
 
 static inline void clk_lock_init(struct clk *c)
@@ -290,6 +317,12 @@ struct tegra_cpufreq_table_data {
 };
 struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void);
 unsigned long tegra_emc_to_cpu_ratio(unsigned long cpu_rate);
+#ifdef CONFIG_ARCH_TEGRA_2x_SOC
+static inline int tegra_update_mselect_rate(unsigned long cpu_rate)
+{ return 0; }
+#else
+int tegra_update_mselect_rate(unsigned long cpu_rate);
+#endif
 #endif
 
 #endif
